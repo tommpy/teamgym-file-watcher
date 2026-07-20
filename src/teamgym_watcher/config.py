@@ -95,8 +95,8 @@ def _build_config(data: dict[str, object]) -> Config:
     _validate_positive(stability_seconds, "stability_seconds")
     _validate_positive(batch_size, "batch_size")
     _validate_import_dir(import_dir)
-    _validate_dest_root(dest_root)
     _validate_not_nested(import_dir, dest_root)
+    _validate_dest_root(dest_root)
     _validate_timezone(timezone)
 
     return Config(

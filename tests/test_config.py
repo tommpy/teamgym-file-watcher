@@ -215,6 +215,17 @@ class TestValidationErrors:
         with pytest.raises(ConfigError, match="must not be inside"):
             load_config(config_path=None, overrides=self._overrides(import_dir, nested_dest))
 
+    def test_dest_root_inside_import_dir_is_not_created_before_rejection(
+        self, tmp_path: Path
+    ) -> None:
+        import_dir, _ = _dirs(tmp_path)
+        nested_dest = import_dir / "sorted"
+
+        with pytest.raises(ConfigError, match="must not be inside"):
+            load_config(config_path=None, overrides=self._overrides(import_dir, nested_dest))
+
+        assert not nested_dest.exists()
+
     def test_import_dir_inside_dest_root_rejected(self, tmp_path: Path) -> None:
         dest_root = tmp_path / "dest"
         dest_root.mkdir()
