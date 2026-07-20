@@ -29,6 +29,7 @@ def setup_logging(verbose: bool, log_file: Path | None = None) -> None:
     for handler in list(root.handlers):
         if handler.name in (_CONSOLE_HANDLER_NAME, _FILE_HANDLER_NAME):
             root.removeHandler(handler)
+            handler.close()
 
     console_handler = RichHandler(rich_tracebacks=True, show_path=False)
     console_handler.set_name(_CONSOLE_HANDLER_NAME)

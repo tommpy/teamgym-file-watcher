@@ -37,3 +37,16 @@ def test_setup_logging_creates_log_file_parent_dir(tmp_path: Path) -> None:
     setup_logging(verbose=False, log_file=log_file)
 
     assert log_file.parent.is_dir()
+
+
+def test_setup_logging_closes_previous_file_handler_on_replacement(tmp_path: Path) -> None:
+    first_log_file = tmp_path / "first.log"
+    setup_logging(verbose=True, log_file=first_log_file)
+    first_handler = next(
+        h for h in logging.getLogger().handlers if h.name == "teamgym_watcher.file"
+    )
+
+    setup_logging(verbose=True, log_file=tmp_path / "second.log")
+
+    assert first_handler.stream is None or first_handler.stream.closed
+    first_log_file.unlink()  # would raise/lock on Windows if the handler were still open
