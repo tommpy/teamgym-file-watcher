@@ -1,0 +1,42 @@
+# Example teamgym-watcher configuration.
+#
+# Copy this file to `teamgym-watcher.toml` in the directory you run the CLI from (or pass
+# `--config /path/to/file.toml`), then fill in the values for your competition. Every
+# setting here can also be overridden per-invocation with the matching CLI option, e.g.
+# `--competition-id`.
+
+# Base URL of the teamgym-sorter API. Use the local dev server while testing, or the
+# production API Gateway invoke URL (see ../lightroom-plugins/teamgym.lrdevplugin/ApiConfig.lua).
+api_base_url = "http://localhost:3001/api"
+
+# Numeric id of the competition to fetch tags for.
+competition_id = 1
+
+# Directory the watcher monitors for new photos (e.g. a card reader's auto-import folder).
+# Must already exist.
+import_dir = "C:/TeamGym/Import"
+
+# Root directory photos are moved into, under `<dest_root>/Competitions/<Competition>/...`.
+# Created automatically if it doesn't exist yet.
+dest_root = "C:/TeamGym/Sorted"
+
+# IANA timezone name used when a photo has no embedded UTC offset (e.g. "Europe/London").
+# Leave unset (or delete this line) to fall back to the local machine's timezone.
+# timezone = "Europe/London"
+
+# Seconds to add to (or subtract from, if negative) each photo's capture time to correct
+# for camera clock skew relative to the server.
+time_offset_seconds = 0
+
+# How often (seconds) to re-fetch the full tag list for the competition from the API.
+tag_refresh_seconds = 60
+
+# How long (seconds) a file's size must be unchanged before it's considered fully written
+# and safe to process.
+stability_seconds = 3
+
+# How many stable files to drain from the watch queue per processing batch.
+batch_size = 25
+
+# When true, log every detection/match/move but never actually move files.
+dry_run = false
