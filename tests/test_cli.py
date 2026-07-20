@@ -1,15 +1,25 @@
-"""CLI invocation tests for the bootstrap stub commands."""
+"""CLI invocation tests for the bootstrap stub commands and the `auth` command."""
 
 from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 from typer.testing import CliRunner
 
 from teamgym_watcher import __version__
-from teamgym_watcher.cli import CONFIG_ERROR_EXIT_CODE, NOT_IMPLEMENTED_EXIT_CODE, app
+from teamgym_watcher.auth import AccessToken, AuthError
+from teamgym_watcher.cli import (
+    AUTH_ERROR_EXIT_CODE,
+    CONFIG_ERROR_EXIT_CODE,
+    NOT_IMPLEMENTED_EXIT_CODE,
+    app,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 runner = CliRunner()
 
@@ -42,7 +52,7 @@ def test_version_option_prints_version_and_exits_zero() -> None:
     assert __version__ in result.output
 
 
-@pytest.mark.parametrize("command", ["run", "process-once", "auth"])
+@pytest.mark.parametrize("command", ["run", "process-once"])
 def test_stub_commands_exit_not_implemented_when_config_is_valid(
     command: str, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -57,7 +67,7 @@ def test_stub_commands_exit_not_implemented_when_config_is_valid(
     assert "not implemented" in caplog.text.lower()
 
 
-@pytest.mark.parametrize("command", ["run", "process-once", "auth"])
+@pytest.mark.parametrize("command", ["run", "process-once"])
 def test_stub_commands_accept_verbose_flag(command: str, tmp_path: Path) -> None:
     import_dir = tmp_path / "import"
     import_dir.mkdir()
@@ -113,3 +123,46 @@ def test_cli_override_takes_precedence_over_toml_file(
 
     assert result.exit_code == NOT_IMPLEMENTED_EXIT_CODE
     assert "competition 42" in caplog.text.lower()
+
+
+def test_auth_command_saves_token_and_prints_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_jwt: Callable[[dict[str, object]], str],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import_dir = tmp_path / "import"
+    import_dir.mkdir()
+    dest_root = tmp_path / "dest"
+    cache_path = tmp_path / "token.json"
+    jwt = make_jwt({"login": "octocat", "email": "octocat@example.com", "exp": 10_000})
+    token = AccessToken(access_token=jwt, token_type="bearer", scope="user:email")
+
+    monkeypatch.setattr("teamgym_watcher.cli.run_device_flow", lambda client, api_base_url: token)
+    monkeypatch.setattr("teamgym_watcher.cli.token_cache_path", lambda: cache_path)
+
+    with caplog.at_level(logging.INFO):
+        result = runner.invoke(app, ["auth", *_valid_args(import_dir, dest_root)])
+
+    assert result.exit_code == 0
+    assert "octocat" in caplog.text
+    assert cache_path.is_file()
+
+
+def test_auth_command_exits_with_auth_error_code_on_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    import_dir = tmp_path / "import"
+    import_dir.mkdir()
+    dest_root = tmp_path / "dest"
+
+    def _raise(client: object, api_base_url: str) -> AccessToken:
+        raise AuthError("Authorization was denied.")
+
+    monkeypatch.setattr("teamgym_watcher.cli.run_device_flow", _raise)
+
+    with caplog.at_level(logging.ERROR):
+        result = runner.invoke(app, ["auth", *_valid_args(import_dir, dest_root)])
+
+    assert result.exit_code == AUTH_ERROR_EXIT_CODE
+    assert "authentication failed" in caplog.text.lower()

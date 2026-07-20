@@ -6,9 +6,17 @@ import logging
 from pathlib import Path
 from typing import Annotated
 
+import httpx
 import typer
 
 from teamgym_watcher import __version__
+from teamgym_watcher.auth import (
+    AuthError,
+    decode_jwt_payload,
+    run_device_flow,
+    save_token_cache,
+    token_cache_path,
+)
 from teamgym_watcher.config import DEFAULT_CONFIG_FILENAME, Config, ConfigError, load_config
 from teamgym_watcher.log import setup_logging
 
@@ -25,6 +33,7 @@ logger = logging.getLogger(__name__)
 
 NOT_IMPLEMENTED_EXIT_CODE = 1
 CONFIG_ERROR_EXIT_CODE = 2
+AUTH_ERROR_EXIT_CODE = 3
 
 _VerboseOption = Annotated[bool, typer.Option("--verbose", "-v", help="Enable debug logging.")]
 _ConfigOption = Annotated[
@@ -225,7 +234,7 @@ def auth(
     batch_size: _BatchSizeOption = None,
     dry_run: _DryRunOption = None,
 ) -> None:
-    """Run the GitHub device-flow authentication against the teamgym-sorter API."""
+    """Force a fresh GitHub device-flow login, cache the JWT, and print the identity."""
     overrides = _build_overrides(
         api_base_url=api_base_url,
         competition_id=competition_id,
@@ -238,8 +247,20 @@ def auth(
         batch_size=batch_size,
         dry_run=dry_run,
     )
-    _resolve_config(verbose, config, overrides)
-    _not_implemented("auth")
+    cfg = _resolve_config(verbose, config, overrides)
+
+    with httpx.Client(timeout=30.0) as client:
+        try:
+            token = run_device_flow(client, cfg.api_base_url)
+            claims = decode_jwt_payload(token.access_token)
+        except AuthError as exc:
+            logger.error("Authentication failed: %s", exc)
+            raise typer.Exit(code=AUTH_ERROR_EXIT_CODE) from exc
+
+    save_token_cache(token_cache_path(), token)
+    logger.info(
+        "Authenticated as %s <%s>.", claims.get("login", "unknown"), claims.get("email", "unknown")
+    )
 
 
 if __name__ == "__main__":
