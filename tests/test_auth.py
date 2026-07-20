@@ -215,6 +215,37 @@ class TestRunDeviceFlow:
         with httpx.Client() as client, pytest.raises(AuthError, match="not configured"):
             _run(client, clock)
 
+    def test_start_failure_with_500_status_raises_auth_error(self, httpx_mock: HTTPXMock) -> None:
+        """The API returns error bodies on non-200 statuses too (see main-api.yaml);
+        these must surface as AuthError, not an uncaught httpx.HTTPStatusError."""
+        httpx_mock.add_response(
+            method="POST",
+            url=f"{API_BASE_URL}/device/start",
+            status_code=500,
+            json={"success": False, "message": "GitHub OAuth is not configured"},
+        )
+        clock = FakeClock()
+
+        with httpx.Client() as client, pytest.raises(AuthError, match="not configured"):
+            _run(client, clock)
+
+    def test_poll_failure_with_400_status_raises_auth_error(self, httpx_mock: HTTPXMock) -> None:
+        """/device/poll returns 400 for an invalid device code; must not raise
+        httpx.HTTPStatusError."""
+        httpx_mock.add_response(
+            method="POST", url=f"{API_BASE_URL}/device/start", json=_start_body()
+        )
+        httpx_mock.add_response(
+            method="POST",
+            url=f"{API_BASE_URL}/device/poll",
+            status_code=400,
+            json={"success": False, "message": "Invalid device code"},
+        )
+        clock = FakeClock()
+
+        with httpx.Client() as client, pytest.raises(AuthError, match="Invalid device code"):
+            _run(client, clock)
+
 
 class TestJwtDecoding:
     def test_decodes_payload_claims(self, make_jwt: Callable[[dict[str, object]], str]) -> None:

@@ -22,7 +22,7 @@ import logging
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, Literal
+from typing import TYPE_CHECKING, Any, Final, Literal
 
 import httpx
 import platformdirs
@@ -160,12 +160,29 @@ def save_token_cache(path: Path, token: AccessToken) -> None:
         path.chmod(0o600)
 
 
+def _parse_response_body(response: httpx.Response) -> dict[str, Any]:
+    """Parse a device-flow JSON body regardless of HTTP status code.
+
+    The sorter API returns its ``{success, error, message}`` error shape on 400/500
+    responses, not just 200 (see ``main-api.yaml``) — matching the plugin's
+    ``LrHttp``-based ``makeHttpRequest``, which never checks the status code and just
+    parses whatever body comes back. Calling ``raise_for_status()`` here would turn a
+    clean, server-provided error message into an uncaught ``httpx.HTTPStatusError``.
+    """
+    try:
+        body = response.json()
+    except ValueError as exc:
+        raise AuthError(f"Invalid response from the server: {exc}") from exc
+    if not isinstance(body, dict):
+        raise AuthError("Invalid response from the server: expected a JSON object.")
+    return body
+
+
 def _start_device_flow(client: httpx.Client, api_base_url: str) -> DeviceAuthorization:
     response = client.post(f"{api_base_url}/device/start", json={})
-    response.raise_for_status()
-    body = response.json()
+    body = _parse_response_body(response)
     if not body.get("success"):
-        raise AuthError(body.get("message", "Failed to start the device flow."))
+        raise AuthError(str(body.get("message", "Failed to start the device flow.")))
 
     data = body["data"]
     return DeviceAuthorization(
@@ -185,8 +202,7 @@ def _poll_device_authorization(
     client: httpx.Client, api_base_url: str, device_code: str
 ) -> AccessToken | _PollStatus:
     response = client.post(f"{api_base_url}/device/poll", json={"deviceCode": device_code})
-    response.raise_for_status()
-    body = response.json()
+    body = _parse_response_body(response)
 
     if body.get("success"):
         data = body["data"]
@@ -202,10 +218,10 @@ def _poll_device_authorization(
     if error == "slow_down":
         return "slow_down"
     if error == "access_denied":
-        raise DeviceFlowDenied(body.get("message", "Authorization was denied."))
+        raise DeviceFlowDenied(str(body.get("message", "Authorization was denied.")))
     if error == "expired_token":
-        raise DeviceFlowExpired(body.get("message", "Device code expired."))
-    raise AuthError(body.get("message", f"Unknown device flow error: {error!r}"))
+        raise DeviceFlowExpired(str(body.get("message", "Device code expired.")))
+    raise AuthError(str(body.get("message", f"Unknown device flow error: {error!r}")))
 
 
 def _display_device_code(authorization: DeviceAuthorization, console: Console) -> None:
