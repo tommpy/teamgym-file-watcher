@@ -55,6 +55,20 @@ class TagCache:
         with self._lock:
             return list(self._tags)
 
+    @property
+    def competition_name(self) -> str | None:
+        """Display name of the watched competition, from the first cached tag that has one.
+
+        ``None`` until the cache holds at least one tag with a name -- callers deriving a
+        hierarchy path (which needs a competition name unconditionally, even for unmatched
+        photos) should fall back to a placeholder in that case.
+        """
+        with self._lock:
+            for tag in self._tags:
+                if tag.competition.name is not None:
+                    return tag.competition.name
+            return None
+
     def refresh(self, client: _TagFetcher) -> None:
         """Fetch all tags for the competition and atomically swap them into the cache.
 

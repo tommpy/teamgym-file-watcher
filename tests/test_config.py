@@ -87,6 +87,25 @@ class TestValidToml:
         assert cfg.stability_seconds == 3
         assert cfg.batch_size == 25
         assert cfg.dry_run is False
+        assert cfg.recursive is False
+
+    def test_recursive_flag_is_parsed_from_toml(self, tmp_path: Path) -> None:
+        import_dir, dest_root = _dirs(tmp_path)
+        config_path = tmp_path / "teamgym-watcher.toml"
+        config_path.write_text(
+            f"""
+            api_base_url = "http://localhost:3001/api"
+            competition_id = 1
+            import_dir = "{import_dir.as_posix()}"
+            dest_root = "{dest_root.as_posix()}"
+            recursive = true
+            """,
+            encoding="utf-8",
+        )
+
+        cfg = load_config(config_path=config_path)
+
+        assert cfg.recursive is True
 
     def test_missing_default_config_file_is_not_an_error(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

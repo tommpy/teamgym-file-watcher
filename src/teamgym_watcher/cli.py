@@ -3,22 +3,40 @@
 from __future__ import annotations
 
 import logging
+import signal
+import threading
+import time
 from pathlib import Path
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 
 import httpx
 import typer
+from rich.console import Console
+from rich.panel import Panel
 
 from teamgym_watcher import __version__
+from teamgym_watcher.api import ApiClient, ApiError
 from teamgym_watcher.auth import (
     AuthError,
     decode_jwt_payload,
+    get_valid_token,
     run_device_flow,
     save_token_cache,
     token_cache_path,
 )
 from teamgym_watcher.config import DEFAULT_CONFIG_FILENAME, Config, ConfigError, load_config
+from teamgym_watcher.exif import ExifToolUnavailableError, ensure_exiftool_available
+from teamgym_watcher.journal import Journal, Stats, StatsSnapshot
 from teamgym_watcher.log import setup_logging
+from teamgym_watcher.mover import group_files
+from teamgym_watcher.pipeline import PipelineDeps, format_summary_line, process_batch
+from teamgym_watcher.tag_cache import TagCache
+from teamgym_watcher.watcher import Watcher
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from teamgym_watcher.mover import PhotoGroup
 
 app = typer.Typer(
     name="teamgym-watcher",
@@ -31,9 +49,11 @@ app = typer.Typer(
 
 logger = logging.getLogger(__name__)
 
-NOT_IMPLEMENTED_EXIT_CODE = 1
 CONFIG_ERROR_EXIT_CODE = 2
 AUTH_ERROR_EXIT_CODE = 3
+EXIFTOOL_ERROR_EXIT_CODE = 4
+API_ERROR_EXIT_CODE = 5
+PROCESSING_ERROR_EXIT_CODE = 6
 
 _VerboseOption = Annotated[bool, typer.Option("--verbose", "-v", help="Enable debug logging.")]
 _ConfigOption = Annotated[
@@ -79,6 +99,16 @@ _BatchSizeOption = Annotated[
 _DryRunOption = Annotated[
     bool | None,
     typer.Option("--dry-run/--no-dry-run", help="Log actions without moving any files."),
+]
+_NonInteractiveOption = Annotated[
+    bool,
+    typer.Option(
+        "--non-interactive",
+        help="Never prompt for interactive re-authentication; pause and wait instead.",
+    ),
+]
+_LogFileOption = Annotated[
+    Path | None, typer.Option("--log-file", help="Also write logs to this rotating file.")
 ]
 
 
@@ -132,9 +162,12 @@ def _build_overrides(
 
 
 def _resolve_config(
-    verbose: bool, config_path: Path | None, overrides: dict[str, object]
+    verbose: bool,
+    config_path: Path | None,
+    overrides: dict[str, object],
+    log_file: Path | None = None,
 ) -> Config:
-    setup_logging(verbose=verbose)
+    setup_logging(verbose=verbose, log_file=log_file)
     try:
         cfg = load_config(config_path=config_path, overrides=overrides)
     except ConfigError as exc:
@@ -150,9 +183,141 @@ def _resolve_config(
     return cfg
 
 
-def _not_implemented(command: str) -> None:
-    logger.error("'%s' is not implemented yet.", command)
-    raise typer.Exit(code=NOT_IMPLEMENTED_EXIT_CODE)
+def _build_deps(cfg: Config, *, interactive: bool) -> PipelineDeps:
+    """Auth check + initial full tag fetch: everything ``run``/``process-once`` need before
+    they can start draining photos."""
+    try:
+        ensure_exiftool_available(cfg)
+    except ExifToolUnavailableError as exc:
+        logger.error(str(exc))
+        raise typer.Exit(code=EXIFTOOL_ERROR_EXIT_CODE) from exc
+
+    try:
+        token = get_valid_token(cfg, interactive=interactive, cache_path=token_cache_path())
+    except AuthError as exc:
+        logger.error("Authentication failed: %s", exc)
+        raise typer.Exit(code=AUTH_ERROR_EXIT_CODE) from exc
+
+    api_client = ApiClient(cfg.api_base_url, token)
+    tag_cache = TagCache(cfg.competition_id, tag_refresh_seconds=cfg.tag_refresh_seconds)
+    try:
+        tag_cache.refresh(api_client)
+    except ApiError as exc:
+        logger.error("Initial tag fetch failed: %s", exc)
+        raise typer.Exit(code=API_ERROR_EXIT_CODE) from exc
+
+    return PipelineDeps(
+        config=cfg,
+        tag_cache=tag_cache,
+        api_client=api_client,
+        journal=Journal(cfg.dest_root),
+        stats=Stats(),
+    )
+
+
+def _log_auth_required() -> None:
+    message = "Authentication required: run `teamgym-watcher auth` to re-authenticate."
+    logger.warning(message)
+    Console().print(
+        Panel(message, title="TeamGym API Authentication Required", style="bold yellow")
+    )
+
+
+def _run_watch_loop(
+    watcher: Watcher,
+    deps: PipelineDeps,
+    *,
+    stop_event: threading.Event,
+    poll_interval_seconds: float = 1.0,
+    summary_interval_seconds: float = 60.0,
+    auth_log_interval_seconds: float = 60.0,
+    sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+) -> StatsSnapshot:
+    """Drain ready batches forever until ``stop_event`` is set (graceful Ctrl-C: the current
+    batch always finishes before the loop checks the event again)."""
+    pending: list[PhotoGroup] = []
+    last_summary = clock()
+    last_auth_log = 0.0
+
+    while not stop_event.is_set():
+        ready = watcher.poll_ready()
+        groups = [*pending, *group_files(ready)]
+        pending = []
+
+        if groups:
+            result = process_batch(groups, deps)
+            pending = list(result.pending)
+            if result.auth_paused:
+                now = clock()
+                if now - last_auth_log >= auth_log_interval_seconds:
+                    _log_auth_required()
+                    last_auth_log = now
+            snapshot = deps.stats.snapshot()
+            logger.info(
+                format_summary_line(
+                    snapshot.processed,
+                    snapshot.matched,
+                    snapshot.random,
+                    snapshot.errors,
+                    len(watcher.queue),
+                )
+            )
+
+        now = clock()
+        if now - last_summary >= summary_interval_seconds:
+            snapshot = deps.stats.snapshot()
+            logger.info(
+                format_summary_line(
+                    snapshot.processed,
+                    snapshot.matched,
+                    snapshot.random,
+                    snapshot.errors,
+                    len(watcher.queue),
+                )
+            )
+            last_summary = now
+
+        if not groups:
+            sleep(poll_interval_seconds)
+
+    final = deps.stats.snapshot()
+    logger.info(
+        "Stopping: %s",
+        format_summary_line(
+            final.processed, final.matched, final.random, final.errors, len(watcher.queue)
+        ),
+    )
+    return final
+
+
+def _drain_once(
+    watcher: Watcher, deps: PipelineDeps, *, sleep: Callable[[float], None] = time.sleep
+) -> bool:
+    """Fully drain whatever is currently in the import directory.
+
+    Returns ``True`` if authentication was required mid-drain -- any not-yet-processed files
+    are left untouched in the import directory (never dropped) and will be retried on the
+    next run.
+    """
+    watcher.rescan(deps.journal.load_processed())
+    pending: list[PhotoGroup] = []
+
+    while True:
+        ready = watcher.poll_ready()
+        groups = [*pending, *group_files(ready)]
+        pending = []
+
+        if not groups:
+            if len(watcher.queue) == 0:
+                return False
+            sleep(deps.config.stability_seconds)
+            continue
+
+        result = process_batch(groups, deps)
+        if result.auth_paused:
+            return True
+        pending = list(result.pending)
 
 
 @app.command()
@@ -169,6 +334,8 @@ def run(
     stability_seconds: _StabilityOption = None,
     batch_size: _BatchSizeOption = None,
     dry_run: _DryRunOption = None,
+    non_interactive: _NonInteractiveOption = False,
+    log_file: _LogFileOption = None,
 ) -> None:
     """Watch the import directory forever, matching and moving photos as they arrive."""
     overrides = _build_overrides(
@@ -183,8 +350,26 @@ def run(
         batch_size=batch_size,
         dry_run=dry_run,
     )
-    _resolve_config(verbose, config, overrides)
-    _not_implemented("run")
+    cfg = _resolve_config(verbose, config, overrides, log_file)
+    deps = _build_deps(cfg, interactive=not non_interactive)
+    watcher = Watcher(
+        cfg.import_dir, recursive=cfg.recursive, stability_seconds=cfg.stability_seconds
+    )
+    watcher.rescan(deps.journal.load_processed())
+    watcher.start(already_processed=deps.journal.load_processed)
+
+    stop_event = threading.Event()
+
+    def _handle_sigint(signum: int, frame: object) -> None:
+        logger.warning("Interrupted; finishing the current batch and shutting down...")
+        stop_event.set()
+
+    previous_handler = signal.signal(signal.SIGINT, _handle_sigint)
+    try:
+        _run_watch_loop(watcher, deps, stop_event=stop_event)
+    finally:
+        signal.signal(signal.SIGINT, previous_handler)
+        watcher.stop()
 
 
 @app.command("process-once")
@@ -201,6 +386,8 @@ def process_once(
     stability_seconds: _StabilityOption = None,
     batch_size: _BatchSizeOption = None,
     dry_run: _DryRunOption = None,
+    non_interactive: _NonInteractiveOption = False,
+    log_file: _LogFileOption = None,
 ) -> None:
     """Drain the import directory once and exit."""
     overrides = _build_overrides(
@@ -215,8 +402,29 @@ def process_once(
         batch_size=batch_size,
         dry_run=dry_run,
     )
-    _resolve_config(verbose, config, overrides)
-    _not_implemented("process-once")
+    cfg = _resolve_config(verbose, config, overrides, log_file)
+    deps = _build_deps(cfg, interactive=not non_interactive)
+    watcher = Watcher(
+        cfg.import_dir, recursive=cfg.recursive, stability_seconds=cfg.stability_seconds
+    )
+
+    auth_paused = _drain_once(watcher, deps)
+    snapshot = deps.stats.snapshot()
+    logger.info(
+        format_summary_line(
+            snapshot.processed,
+            snapshot.matched,
+            snapshot.random,
+            snapshot.errors,
+            len(watcher.queue),
+        )
+    )
+
+    if auth_paused:
+        logger.error("Authentication required; run `teamgym-watcher auth` and try again.")
+        raise typer.Exit(code=AUTH_ERROR_EXIT_CODE)
+    if snapshot.errors > 0:
+        raise typer.Exit(code=PROCESSING_ERROR_EXIT_CODE)
 
 
 @app.command()

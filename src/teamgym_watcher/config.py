@@ -40,6 +40,7 @@ class Config:
     dry_run: bool = False
     exiftool_enabled: bool = False
     exiftool_path: str = "exiftool"
+    recursive: bool = False
 
 
 def load_config(
@@ -94,6 +95,7 @@ def _build_config(data: dict[str, object]) -> Config:
     dry_run = _as_bool(data.get("dry_run", False), "dry_run")
     exiftool_enabled = _as_bool(data.get("exiftool_enabled", False), "exiftool_enabled")
     exiftool_path = _as_str(data.get("exiftool_path", "exiftool"), "exiftool_path")
+    recursive = _as_bool(data.get("recursive", False), "recursive")
 
     _validate_positive(tag_refresh_seconds, "tag_refresh_seconds")
     _validate_positive(stability_seconds, "stability_seconds")
@@ -116,6 +118,7 @@ def _build_config(data: dict[str, object]) -> Config:
         dry_run=dry_run,
         exiftool_enabled=exiftool_enabled,
         exiftool_path=exiftool_path,
+        recursive=recursive,
     )
 
 

@@ -9,7 +9,7 @@ from teamgym_watcher.api import Competition, Tag
 from teamgym_watcher.tag_cache import TagCache
 
 
-def _tag(id_: int, hour: int) -> Tag:
+def _tag(id_: int, hour: int, *, competition_name: str | None = "X") -> Tag:
     return Tag(
         id=id_,
         competition_id=1,
@@ -22,7 +22,7 @@ def _tag(id_: int, hour: int) -> Tag:
         team=None,
         group=None,
         award=None,
-        competition=Competition(name="X", type="INTERNATIONAL"),
+        competition=Competition(name=competition_name, type="INTERNATIONAL"),
     )
 
 
@@ -132,3 +132,32 @@ class TestConcurrentAccess:
             reader_thread.join(timeout=5)
 
         assert observed_lengths <= {len(old_tags), len(new_tags)}
+
+
+class TestCompetitionName:
+    def test_none_before_any_refresh(self) -> None:
+        cache = TagCache(1, tag_refresh_seconds=60)
+
+        assert cache.competition_name is None
+
+    def test_returns_name_from_first_named_tag(self) -> None:
+        cache = TagCache(1, tag_refresh_seconds=60)
+        cache.refresh(FakeApiClient([_tag(1, 10, competition_name="World Champs")]))
+
+        assert cache.competition_name == "World Champs"
+
+    def test_falls_back_to_a_later_tag_when_the_first_has_no_name(self) -> None:
+        cache = TagCache(1, tag_refresh_seconds=60)
+        cache.refresh(
+            FakeApiClient(
+                [_tag(1, 10, competition_name=None), _tag(2, 11, competition_name="World Champs")]
+            )
+        )
+
+        assert cache.competition_name == "World Champs"
+
+    def test_none_when_no_cached_tag_has_a_name(self) -> None:
+        cache = TagCache(1, tag_refresh_seconds=60)
+        cache.refresh(FakeApiClient([_tag(1, 10, competition_name=None)]))
+
+        assert cache.competition_name is None
