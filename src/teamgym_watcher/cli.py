@@ -223,6 +223,39 @@ def _log_auth_required() -> None:
     )
 
 
+def _process_ready_groups(
+    watcher: Watcher, groups: list[PhotoGroup], deps: PipelineDeps
+) -> tuple[list[PhotoGroup], bool]:
+    """Process ``groups`` in ``deps.config.batch_size``-sized chunks.
+
+    PLAN.md's "Batching / API economy" requires photos to be drained in batches (default 25)
+    so log output and journal writes are chunked even when a rescan or long-idle period hands
+    back far more than one chunk's worth of ready files at once. Logs the summary line on
+    every chunk's completion.
+
+    Returns the groups left unattempted because authentication was required partway through a
+    chunk, and whether that happened -- the caller must keep them queued and retry, never drop
+    them.
+    """
+    size = deps.config.batch_size
+    for start in range(0, len(groups), size):
+        chunk = groups[start : start + size]
+        result = process_batch(chunk, deps)
+        snapshot = deps.stats.snapshot()
+        logger.info(
+            format_summary_line(
+                snapshot.processed,
+                snapshot.matched,
+                snapshot.random,
+                snapshot.errors,
+                len(watcher.queue),
+            )
+        )
+        if result.auth_paused:
+            return [*result.pending, *groups[start + len(chunk) :]], True
+    return [], False
+
+
 def _run_watch_loop(
     watcher: Watcher,
     deps: PipelineDeps,
@@ -246,23 +279,12 @@ def _run_watch_loop(
         pending = []
 
         if groups:
-            result = process_batch(groups, deps)
-            pending = list(result.pending)
-            if result.auth_paused:
+            pending, auth_paused = _process_ready_groups(watcher, groups, deps)
+            if auth_paused:
                 now = clock()
                 if now - last_auth_log >= auth_log_interval_seconds:
                     _log_auth_required()
                     last_auth_log = now
-            snapshot = deps.stats.snapshot()
-            logger.info(
-                format_summary_line(
-                    snapshot.processed,
-                    snapshot.matched,
-                    snapshot.random,
-                    snapshot.errors,
-                    len(watcher.queue),
-                )
-            )
 
         now = clock()
         if now - last_summary >= summary_interval_seconds:
@@ -314,10 +336,9 @@ def _drain_once(
             sleep(deps.config.stability_seconds)
             continue
 
-        result = process_batch(groups, deps)
-        if result.auth_paused:
+        pending, auth_paused = _process_ready_groups(watcher, groups, deps)
+        if auth_paused:
             return True
-        pending = list(result.pending)
 
 
 @app.command()

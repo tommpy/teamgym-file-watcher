@@ -27,13 +27,15 @@ from teamgym_watcher.cli import (
     EXIFTOOL_ERROR_EXIT_CODE,
     PROCESSING_ERROR_EXIT_CODE,
     _drain_once,
+    _process_ready_groups,
     _run_watch_loop,
     app,
 )
 from teamgym_watcher.config import Config
 from teamgym_watcher.exif import ExifToolUnavailableError, MissingCaptureTimeError
 from teamgym_watcher.journal import Journal, JournalStatus, Stats
-from teamgym_watcher.pipeline import PipelineDeps
+from teamgym_watcher.mover import PhotoGroup
+from teamgym_watcher.pipeline import BatchResult, PipelineDeps, process_batch
 from teamgym_watcher.tag_cache import TagCache
 from teamgym_watcher.watcher import Watcher
 
@@ -89,7 +91,9 @@ def _always_missing_capture_time(path: Path, config: Config) -> None:
     raise MissingCaptureTimeError(f"no exif in {path}")
 
 
-def _pipeline_deps(tmp_path: Path, *, import_dir: Path | None = None) -> PipelineDeps:
+def _pipeline_deps(
+    tmp_path: Path, *, import_dir: Path | None = None, batch_size: int = 25
+) -> PipelineDeps:
     resolved_import_dir = import_dir if import_dir is not None else tmp_path / "import"
     resolved_import_dir.mkdir(parents=True, exist_ok=True)
     dest_root = tmp_path / "dest"
@@ -99,6 +103,7 @@ def _pipeline_deps(tmp_path: Path, *, import_dir: Path | None = None) -> Pipelin
         competition_id=1,
         import_dir=resolved_import_dir,
         dest_root=dest_root,
+        batch_size=batch_size,
     )
     cache = TagCache(1, tag_refresh_seconds=3600, clock=lambda: 100.0)
     cache.refresh(_FakeApiClient([]))
@@ -428,3 +433,74 @@ class TestRunWatchLoop:
 
         # One periodic summary line mid-loop, plus the final "Stopping: ..." summary.
         assert caplog.text.count("processed=") >= 2
+
+
+class TestProcessReadyGroups:
+    """PLAN.md's "Batching / API economy": ready groups must be drained in
+    ``config.batch_size``-sized chunks, not all at once, even when a rescan hands back many
+    more files than that in a single poll."""
+
+    def _groups(self, import_dir: Path, count: int) -> list[PhotoGroup]:
+        groups = []
+        for n in range(count):
+            photo = import_dir / f"{n}.JPG"
+            photo.write_bytes(b"data")
+            groups.append(PhotoGroup(files=(photo,), capture_time_file=photo))
+        return groups
+
+    def test_splits_into_batch_size_chunks_and_logs_per_chunk(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        import_dir = tmp_path / "import"
+        import_dir.mkdir()
+        deps = _pipeline_deps(tmp_path, import_dir=import_dir, batch_size=2)
+        watcher = Watcher(import_dir, stability_seconds=0)
+        groups = self._groups(import_dir, 5)
+
+        chunk_sizes: list[int] = []
+
+        def spy(chunk: object, deps_: PipelineDeps) -> BatchResult:
+            chunk = list(chunk)  # type: ignore[arg-type]
+            chunk_sizes.append(len(chunk))
+            return process_batch(chunk, deps_)  # type: ignore[arg-type]
+
+        monkeypatch.setattr("teamgym_watcher.cli.process_batch", spy)
+
+        with caplog.at_level(logging.INFO):
+            pending, auth_paused = _process_ready_groups(watcher, groups, deps)
+
+        assert auth_paused is False
+        assert pending == []
+        assert chunk_sizes == [2, 2, 1]  # 5 groups, batch_size=2 -> three chunks
+        assert deps.stats.snapshot().processed == 5
+        assert caplog.text.count("processed=") == 3  # one summary line per chunk
+
+    def test_auth_pause_mid_chunking_returns_remaining_chunks_as_pending(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import_dir = tmp_path / "import"
+        import_dir.mkdir()
+        deps = _pipeline_deps(tmp_path, import_dir=import_dir, batch_size=2)
+        watcher = Watcher(import_dir, stability_seconds=0)
+        groups = self._groups(import_dir, 5)
+        call_count = {"n": 0}
+
+        def fake_process_batch(chunk: object, deps_: PipelineDeps) -> BatchResult:
+            call_count["n"] += 1
+            chunk_list = list(chunk)  # type: ignore[arg-type]
+            if call_count["n"] == 2:
+                return BatchResult(outcomes=(), pending=tuple(chunk_list), auth_paused=True)
+            return BatchResult(outcomes=(), pending=(), auth_paused=False)
+
+        monkeypatch.setattr("teamgym_watcher.cli.process_batch", fake_process_batch)
+
+        pending, auth_paused = _process_ready_groups(watcher, groups, deps)
+
+        assert auth_paused is True
+        # Second chunk (groups[2:4]) pauses in full, plus the third chunk (groups[4:]) that
+        # was never attempted -- neither may be dropped.
+        assert pending == groups[2:]
+        assert call_count["n"] == 2  # the third chunk must not be attempted after the pause
