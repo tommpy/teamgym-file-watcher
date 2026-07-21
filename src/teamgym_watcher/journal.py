@@ -94,9 +94,15 @@ class Journal:
             logger.error("Failed to write journal record to %s: %s", self._path, exc)
 
     def load_processed(self) -> set[str]:
-        """Source file names (``Path.name``) already journaled, from any prior run, for the
-        watcher to skip on restart -- regardless of their recorded status, so a file that
-        errored last time is not retried forever on every restart."""
+        """Source file paths already journaled, from any prior run, for the watcher to skip
+        on restart -- regardless of their recorded status, so a file that errored last time
+        is not retried forever on every restart.
+
+        Dedup is by full path (per prompts/09), not just filename: two distinct photos that
+        happen to share a filename (e.g. two cameras both numbering from ``IMG_0001.JPG``,
+        or a later card reusing a name once already imported) must each still be processed --
+        ``mover.py``'s collision-safe suffixing exists precisely to land both of them.
+        """
         processed: set[str] = set()
         if not self._path.is_file():
             return processed
@@ -114,7 +120,7 @@ class Journal:
                         continue
                     for source in data.get("source_paths", []):
                         if isinstance(source, str):
-                            processed.add(Path(source).name)
+                            processed.add(source)
         except OSError as exc:
             logger.error("Failed to read journal at %s: %s", self._path, exc)
 

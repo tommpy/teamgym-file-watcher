@@ -192,11 +192,13 @@ class Watcher:
     def rescan(self, already_processed: set[str]) -> int:
         """Scan ``import_dir`` once and enqueue any watchable file not already journaled.
 
+        ``already_processed`` holds full source paths (as journaled), not filenames -- two
+        different photos that happen to share a filename must each still be enqueued.
         Returns the number of newly tracked paths (already-tracked paths are a dedup no-op).
         """
         found = 0
         for path in scan_directory(self._import_dir, recursive=self._recursive):
-            if path.name in already_processed:
+            if str(path) in already_processed:
                 continue
             before = len(self.queue)
             self.queue.enqueue(path)

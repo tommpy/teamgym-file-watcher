@@ -101,7 +101,7 @@ class TestLoadProcessed:
 
         assert journal.load_processed() == set()
 
-    def test_returns_source_names_from_prior_run(self, tmp_path: Path) -> None:
+    def test_returns_source_paths_from_prior_run(self, tmp_path: Path) -> None:
         journal = Journal(tmp_path)
         journal.append(
             _record(
@@ -112,7 +112,27 @@ class TestLoadProcessed:
 
         processed = journal.load_processed()
 
-        assert processed == {"IMG_0001.CR3", "IMG_0001.JPG"}
+        assert processed == {
+            str(tmp_path / "src" / "IMG_0001.CR3"),
+            str(tmp_path / "src" / "IMG_0001.JPG"),
+        }
+
+    def test_dedup_is_by_full_path_not_filename(self, tmp_path: Path) -> None:
+        """Two distinct photos sharing a filename (different cameras, or a later card reusing
+        a name) must each still be treated as unprocessed -- only the exact prior path is
+        skipped, per prompts/09 ("dedup by path")."""
+        journal = Journal(tmp_path)
+        journal.append(
+            _record(
+                sources=(tmp_path / "card1" / "IMG_0001.JPG",),
+                dests=(tmp_path / "dest" / "IMG_0001.JPG",),
+            )
+        )
+
+        processed = journal.load_processed()
+
+        assert str(tmp_path / "card1" / "IMG_0001.JPG") in processed
+        assert str(tmp_path / "card2" / "IMG_0001.JPG") not in processed
 
     def test_restart_reads_records_appended_by_a_prior_journal_instance(
         self, tmp_path: Path
@@ -126,7 +146,7 @@ class TestLoadProcessed:
         )
 
         second = Journal(tmp_path)
-        assert second.load_processed() == {"IMG_0003.JPG"}
+        assert second.load_processed() == {str(tmp_path / "src" / "IMG_0003.JPG")}
 
     def test_error_status_records_are_also_treated_as_processed(self, tmp_path: Path) -> None:
         journal = Journal(tmp_path)
@@ -141,7 +161,7 @@ class TestLoadProcessed:
             )
         )
 
-        assert journal.load_processed() == {"IMG_0004.JPG"}
+        assert journal.load_processed() == {str(tmp_path / "src" / "IMG_0004.JPG")}
 
     def test_malformed_line_is_skipped_without_raising(self, tmp_path: Path) -> None:
         journal = Journal(tmp_path)
@@ -156,7 +176,7 @@ class TestLoadProcessed:
 
         processed = journal.load_processed()
 
-        assert processed == {"IMG_0005.JPG"}
+        assert processed == {str(tmp_path / "src" / "IMG_0005.JPG")}
 
 
 class TestAppendFailureDoesNotRaise:

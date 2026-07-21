@@ -172,14 +172,26 @@ class TestWatcherRescan:
         assert found == 1
         assert len(watcher.queue) == 1
 
-    def test_rescan_skips_already_journaled_names(self, tmp_path: Path) -> None:
+    def test_rescan_skips_already_journaled_paths(self, tmp_path: Path) -> None:
         _touch(tmp_path / "a.jpg")
         watcher = Watcher(tmp_path, stability_seconds=3)
 
-        found = watcher.rescan(already_processed={"a.jpg"})
+        found = watcher.rescan(already_processed={str(tmp_path / "a.jpg")})
 
         assert found == 0
         assert len(watcher.queue) == 0
+
+    def test_rescan_does_not_skip_a_different_file_with_the_same_name(self, tmp_path: Path) -> None:
+        """Dedup is by full path, not filename -- a different photo that happens to share a
+        name with something already journaled (e.g. a new card resetting its counter) must
+        still be enqueued; mover.py's collision-safe suffixing is what lands both of them."""
+        _touch(tmp_path / "a.jpg")
+        watcher = Watcher(tmp_path, stability_seconds=3)
+
+        found = watcher.rescan(already_processed={str(tmp_path / "elsewhere" / "a.jpg")})
+
+        assert found == 1
+        assert len(watcher.queue) == 1
 
     def test_rescan_dedups_against_already_tracked_paths(self, tmp_path: Path) -> None:
         _touch(tmp_path / "a.jpg")
