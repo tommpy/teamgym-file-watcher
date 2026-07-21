@@ -38,6 +38,8 @@ class Config:
     stability_seconds: int = 3
     batch_size: int = 25
     dry_run: bool = False
+    exiftool_enabled: bool = False
+    exiftool_path: str = "exiftool"
 
 
 def load_config(
@@ -90,6 +92,8 @@ def _build_config(data: dict[str, object]) -> Config:
     stability_seconds = _as_int(data.get("stability_seconds", 3), "stability_seconds")
     batch_size = _as_int(data.get("batch_size", 25), "batch_size")
     dry_run = _as_bool(data.get("dry_run", False), "dry_run")
+    exiftool_enabled = _as_bool(data.get("exiftool_enabled", False), "exiftool_enabled")
+    exiftool_path = _as_str(data.get("exiftool_path", "exiftool"), "exiftool_path")
 
     _validate_positive(tag_refresh_seconds, "tag_refresh_seconds")
     _validate_positive(stability_seconds, "stability_seconds")
@@ -110,6 +114,8 @@ def _build_config(data: dict[str, object]) -> Config:
         stability_seconds=stability_seconds,
         batch_size=batch_size,
         dry_run=dry_run,
+        exiftool_enabled=exiftool_enabled,
+        exiftool_path=exiftool_path,
     )
 
 
