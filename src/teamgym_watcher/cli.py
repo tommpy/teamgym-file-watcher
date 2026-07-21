@@ -24,7 +24,7 @@ from teamgym_watcher.auth import (
     save_token_cache,
     token_cache_path,
 )
-from teamgym_watcher.config import DEFAULT_CONFIG_FILENAME, Config, ConfigError, load_config
+from teamgym_watcher.config import Config, ConfigError, build_config, resolve_api_base_url
 from teamgym_watcher.exif import ExifToolUnavailableError, ensure_exiftool_available
 from teamgym_watcher.journal import Journal, Stats, StatsSnapshot
 from teamgym_watcher.log import setup_logging
@@ -56,49 +56,76 @@ API_ERROR_EXIT_CODE = 5
 PROCESSING_ERROR_EXIT_CODE = 6
 
 _VerboseOption = Annotated[bool, typer.Option("--verbose", "-v", help="Enable debug logging.")]
-_ConfigOption = Annotated[
-    Path | None,
+_ApiBaseUrlOption = Annotated[
+    str | None,
     typer.Option(
-        "--config", help=f"Path to the TOML config file (default: {DEFAULT_CONFIG_FILENAME})."
+        "--api-base-url",
+        help="Override API base URL directly; takes precedence over --local/--staging.",
     ),
 ]
-_ApiBaseUrlOption = Annotated[
-    str | None, typer.Option("--api-base-url", help="Base URL of the teamgym-sorter API.")
+_LocalOption = Annotated[
+    bool,
+    typer.Option("--local", help="Use local API base URL (http://localhost:3001/api)."),
+]
+_StagingOption = Annotated[
+    bool,
+    typer.Option(
+        "--staging",
+        help="Use staging API base URL (https://api-staging.tagging.teamgymphotos.com/api).",
+    ),
 ]
 _CompetitionIdOption = Annotated[
-    int | None, typer.Option("--competition-id", help="Competition id to fetch tags for.")
+    int, typer.Option("--competition-id", help="Competition id to fetch tags for.")
 ]
 _ImportDirOption = Annotated[
-    Path | None, typer.Option("--import-dir", help="Directory to watch for new photos.")
+    Path, typer.Option("--import-dir", help="Directory to watch for new photos.")
 ]
 _DestRootOption = Annotated[
-    Path | None, typer.Option("--dest-root", help="Root directory to move sorted photos into.")
+    Path, typer.Option("--dest-root", help="Root directory to move sorted photos into.")
 ]
 _TimezoneOption = Annotated[
     str | None,
     typer.Option(
-        "--timezone", help="IANA timezone fallback for photos without an embedded UTC offset."
+        "--timezone",
+        help="IANA timezone fallback for photos without an embedded UTC offset.",
     ),
 ]
 _TimeOffsetOption = Annotated[
-    int | None,
+    int,
     typer.Option("--time-offset-seconds", help="Camera clock-skew correction, in seconds."),
 ]
 _TagRefreshOption = Annotated[
-    int | None, typer.Option("--tag-refresh-seconds", help="How often to refresh the tag cache.")
+    int,
+    typer.Option("--tag-refresh-seconds", help="How often to refresh the tag cache."),
 ]
 _StabilityOption = Annotated[
-    int | None,
+    int,
     typer.Option(
-        "--stability-seconds", help="Seconds a file's size must be unchanged before processing."
+        "--stability-seconds",
+        help="Seconds a file's size must be unchanged before processing.",
     ),
 ]
 _BatchSizeOption = Annotated[
-    int | None, typer.Option("--batch-size", help="Files to drain per processing batch.")
+    int, typer.Option("--batch-size", help="Files to drain per processing batch.")
 ]
 _DryRunOption = Annotated[
-    bool | None,
+    bool,
     typer.Option("--dry-run/--no-dry-run", help="Log actions without moving any files."),
+]
+_RecursiveOption = Annotated[
+    bool,
+    typer.Option("--recursive/--no-recursive", help="Watch import-dir recursively."),
+]
+_ExiftoolEnabledOption = Annotated[
+    bool,
+    typer.Option(
+        "--exiftool-enabled/--no-exiftool-enabled",
+        help="Enable exiftool fallback for RAW formats unsupported by exifread.",
+    ),
+]
+_ExiftoolPathOption = Annotated[
+    str,
+    typer.Option("--exiftool-path", help="Path to the exiftool executable."),
 ]
 _NonInteractiveOption = Annotated[
     bool,
@@ -133,43 +160,48 @@ def main(
     """teamgym-watcher: sort TeamGym competition photos into a Zenfolio-ready folder hierarchy."""
 
 
-def _build_overrides(
-    *,
-    api_base_url: str | None,
-    competition_id: int | None,
-    import_dir: Path | None,
-    dest_root: Path | None,
-    timezone: str | None,
-    time_offset_seconds: int | None,
-    tag_refresh_seconds: int | None,
-    stability_seconds: int | None,
-    batch_size: int | None,
-    dry_run: bool | None,
-) -> dict[str, object]:
-    values: dict[str, object | None] = {
-        "api_base_url": api_base_url,
-        "competition_id": competition_id,
-        "import_dir": import_dir,
-        "dest_root": dest_root,
-        "timezone": timezone,
-        "time_offset_seconds": time_offset_seconds,
-        "tag_refresh_seconds": tag_refresh_seconds,
-        "stability_seconds": stability_seconds,
-        "batch_size": batch_size,
-        "dry_run": dry_run,
-    }
-    return {key: value for key, value in values.items() if value is not None}
-
-
 def _resolve_config(
+    *,
     verbose: bool,
-    config_path: Path | None,
-    overrides: dict[str, object],
-    log_file: Path | None = None,
+    log_file: Path | None,
+    api_base_url: str | None,
+    local: bool,
+    staging: bool,
+    competition_id: int,
+    import_dir: Path,
+    dest_root: Path,
+    timezone: str | None,
+    time_offset_seconds: int,
+    tag_refresh_seconds: int,
+    stability_seconds: int,
+    batch_size: int,
+    dry_run: bool,
+    exiftool_enabled: bool,
+    exiftool_path: str,
+    recursive: bool,
 ) -> Config:
     setup_logging(verbose=verbose, log_file=log_file)
     try:
-        cfg = load_config(config_path=config_path, overrides=overrides)
+        resolved_api_base_url = resolve_api_base_url(
+            local=local,
+            staging=staging,
+            api_base_url=api_base_url,
+        )
+        cfg = build_config(
+            api_base_url=resolved_api_base_url,
+            competition_id=competition_id,
+            import_dir=import_dir,
+            dest_root=dest_root,
+            timezone=timezone,
+            time_offset_seconds=time_offset_seconds,
+            tag_refresh_seconds=tag_refresh_seconds,
+            stability_seconds=stability_seconds,
+            batch_size=batch_size,
+            dry_run=dry_run,
+            exiftool_enabled=exiftool_enabled,
+            exiftool_path=exiftool_path,
+            recursive=recursive,
+        )
     except ConfigError as exc:
         logger.error("Configuration error: %s", exc)
         raise typer.Exit(code=CONFIG_ERROR_EXIT_CODE) from exc
@@ -343,24 +375,32 @@ def _drain_once(
 
 @app.command()
 def run(
+    competition_id: _CompetitionIdOption,
+    import_dir: _ImportDirOption,
+    dest_root: _DestRootOption,
     verbose: _VerboseOption = False,
-    config: _ConfigOption = None,
     api_base_url: _ApiBaseUrlOption = None,
-    competition_id: _CompetitionIdOption = None,
-    import_dir: _ImportDirOption = None,
-    dest_root: _DestRootOption = None,
+    local: _LocalOption = False,
+    staging: _StagingOption = False,
     timezone: _TimezoneOption = None,
-    time_offset_seconds: _TimeOffsetOption = None,
-    tag_refresh_seconds: _TagRefreshOption = None,
-    stability_seconds: _StabilityOption = None,
-    batch_size: _BatchSizeOption = None,
-    dry_run: _DryRunOption = None,
+    time_offset_seconds: _TimeOffsetOption = 0,
+    tag_refresh_seconds: _TagRefreshOption = 60,
+    stability_seconds: _StabilityOption = 3,
+    batch_size: _BatchSizeOption = 25,
+    dry_run: _DryRunOption = False,
+    recursive: _RecursiveOption = False,
+    exiftool_enabled: _ExiftoolEnabledOption = False,
+    exiftool_path: _ExiftoolPathOption = "exiftool",
     non_interactive: _NonInteractiveOption = False,
     log_file: _LogFileOption = None,
 ) -> None:
     """Watch the import directory forever, matching and moving photos as they arrive."""
-    overrides = _build_overrides(
+    cfg = _resolve_config(
+        verbose=verbose,
+        log_file=log_file,
         api_base_url=api_base_url,
+        local=local,
+        staging=staging,
         competition_id=competition_id,
         import_dir=import_dir,
         dest_root=dest_root,
@@ -370,8 +410,10 @@ def run(
         stability_seconds=stability_seconds,
         batch_size=batch_size,
         dry_run=dry_run,
+        recursive=recursive,
+        exiftool_enabled=exiftool_enabled,
+        exiftool_path=exiftool_path,
     )
-    cfg = _resolve_config(verbose, config, overrides, log_file)
     deps = _build_deps(cfg, interactive=not non_interactive)
     watcher = Watcher(
         cfg.import_dir, recursive=cfg.recursive, stability_seconds=cfg.stability_seconds
@@ -395,24 +437,32 @@ def run(
 
 @app.command("process-once")
 def process_once(
+    competition_id: _CompetitionIdOption,
+    import_dir: _ImportDirOption,
+    dest_root: _DestRootOption,
     verbose: _VerboseOption = False,
-    config: _ConfigOption = None,
     api_base_url: _ApiBaseUrlOption = None,
-    competition_id: _CompetitionIdOption = None,
-    import_dir: _ImportDirOption = None,
-    dest_root: _DestRootOption = None,
+    local: _LocalOption = False,
+    staging: _StagingOption = False,
     timezone: _TimezoneOption = None,
-    time_offset_seconds: _TimeOffsetOption = None,
-    tag_refresh_seconds: _TagRefreshOption = None,
-    stability_seconds: _StabilityOption = None,
-    batch_size: _BatchSizeOption = None,
-    dry_run: _DryRunOption = None,
+    time_offset_seconds: _TimeOffsetOption = 0,
+    tag_refresh_seconds: _TagRefreshOption = 60,
+    stability_seconds: _StabilityOption = 3,
+    batch_size: _BatchSizeOption = 25,
+    dry_run: _DryRunOption = False,
+    recursive: _RecursiveOption = False,
+    exiftool_enabled: _ExiftoolEnabledOption = False,
+    exiftool_path: _ExiftoolPathOption = "exiftool",
     non_interactive: _NonInteractiveOption = False,
     log_file: _LogFileOption = None,
 ) -> None:
     """Drain the import directory once and exit."""
-    overrides = _build_overrides(
+    cfg = _resolve_config(
+        verbose=verbose,
+        log_file=log_file,
         api_base_url=api_base_url,
+        local=local,
+        staging=staging,
         competition_id=competition_id,
         import_dir=import_dir,
         dest_root=dest_root,
@@ -422,8 +472,10 @@ def process_once(
         stability_seconds=stability_seconds,
         batch_size=batch_size,
         dry_run=dry_run,
+        recursive=recursive,
+        exiftool_enabled=exiftool_enabled,
+        exiftool_path=exiftool_path,
     )
-    cfg = _resolve_config(verbose, config, overrides, log_file)
     deps = _build_deps(cfg, interactive=not non_interactive)
     watcher = Watcher(
         cfg.import_dir, recursive=cfg.recursive, stability_seconds=cfg.stability_seconds
@@ -450,22 +502,30 @@ def process_once(
 
 @app.command()
 def auth(
+    competition_id: _CompetitionIdOption,
+    import_dir: _ImportDirOption,
+    dest_root: _DestRootOption,
     verbose: _VerboseOption = False,
-    config: _ConfigOption = None,
     api_base_url: _ApiBaseUrlOption = None,
-    competition_id: _CompetitionIdOption = None,
-    import_dir: _ImportDirOption = None,
-    dest_root: _DestRootOption = None,
+    local: _LocalOption = False,
+    staging: _StagingOption = False,
     timezone: _TimezoneOption = None,
-    time_offset_seconds: _TimeOffsetOption = None,
-    tag_refresh_seconds: _TagRefreshOption = None,
-    stability_seconds: _StabilityOption = None,
-    batch_size: _BatchSizeOption = None,
-    dry_run: _DryRunOption = None,
+    time_offset_seconds: _TimeOffsetOption = 0,
+    tag_refresh_seconds: _TagRefreshOption = 60,
+    stability_seconds: _StabilityOption = 3,
+    batch_size: _BatchSizeOption = 25,
+    dry_run: _DryRunOption = False,
+    recursive: _RecursiveOption = False,
+    exiftool_enabled: _ExiftoolEnabledOption = False,
+    exiftool_path: _ExiftoolPathOption = "exiftool",
 ) -> None:
     """Force a fresh GitHub device-flow login, cache the JWT, and print the identity."""
-    overrides = _build_overrides(
+    cfg = _resolve_config(
+        verbose=verbose,
+        log_file=None,
         api_base_url=api_base_url,
+        local=local,
+        staging=staging,
         competition_id=competition_id,
         import_dir=import_dir,
         dest_root=dest_root,
@@ -475,8 +535,10 @@ def auth(
         stability_seconds=stability_seconds,
         batch_size=batch_size,
         dry_run=dry_run,
+        recursive=recursive,
+        exiftool_enabled=exiftool_enabled,
+        exiftool_path=exiftool_path,
     )
-    cfg = _resolve_config(verbose, config, overrides)
 
     with httpx.Client(timeout=30.0) as client:
         try:

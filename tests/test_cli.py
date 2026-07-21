@@ -31,7 +31,12 @@ from teamgym_watcher.cli import (
     _run_watch_loop,
     app,
 )
-from teamgym_watcher.config import Config
+from teamgym_watcher.config import (
+    LOCAL_API_BASE_URL,
+    PROD_API_BASE_URL,
+    STAGING_API_BASE_URL,
+    Config,
+)
 from teamgym_watcher.exif import ExifToolUnavailableError, MissingCaptureTimeError
 from teamgym_watcher.journal import Journal, JournalStatus, Stats
 from teamgym_watcher.mover import PhotoGroup
@@ -46,10 +51,8 @@ runner = CliRunner()
 API_BASE_URL = "http://localhost:3001/api"
 
 
-def _valid_args(import_dir: Path, dest_root: Path) -> list[str]:
+def _required_args(import_dir: Path, dest_root: Path) -> list[str]:
     return [
-        "--api-base-url",
-        API_BASE_URL,
         "--competition-id",
         "1",
         "--import-dir",
@@ -59,14 +62,20 @@ def _valid_args(import_dir: Path, dest_root: Path) -> list[str]:
     ]
 
 
+def _valid_args(import_dir: Path, dest_root: Path) -> list[str]:
+    return ["--api-base-url", API_BASE_URL, *_required_args(import_dir, dest_root)]
+
+
 def _tags_response(tags: list[dict[str, object]] | None = None) -> dict[str, object]:
     return {"data": tags or [], "meta": {"hasNext": False}}
 
 
-def _mock_tags_endpoint(httpx_mock: HTTPXMock, json: dict[str, object]) -> None:
+def _mock_tags_endpoint(
+    httpx_mock: HTTPXMock, json: dict[str, object], base_url: str = API_BASE_URL
+) -> None:
     httpx_mock.add_response(
         method="GET",
-        url=f"{API_BASE_URL}/tags",
+        url=f"{base_url}/tags",
         match_params={"page": "1", "limit": "100"},
         json=json,
     )
@@ -134,14 +143,18 @@ def test_version_option_prints_version_and_exits_zero() -> None:
 
 
 @pytest.mark.parametrize("command", ["run", "process-once", "auth"])
-def test_config_error_exits_with_config_error_code(
+def test_local_and_staging_conflict_exits_with_config_error_code(
     command: str, caplog: pytest.LogCaptureFixture, tmp_path: Path
 ) -> None:
-    config_path = tmp_path / "empty.toml"
-    config_path.write_text("", encoding="utf-8")
+    import_dir = tmp_path / "import"
+    import_dir.mkdir()
+    dest_root = tmp_path / "dest"
 
     with caplog.at_level(logging.ERROR):
-        result = runner.invoke(app, [command, "--config", str(config_path)])
+        result = runner.invoke(
+            app,
+            [command, "--local", "--staging", *_required_args(import_dir, dest_root)],
+        )
 
     assert result.exit_code == CONFIG_ERROR_EXIT_CODE
     assert "configuration error" in caplog.text.lower()
@@ -236,6 +249,34 @@ def test_process_once_happy_path_drains_directory_and_exits_zero(
     assert not (import_dir / "IMG_0001.JPG").exists()
 
 
+def test_process_once_local_flag_uses_local_api_base_url(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_jwt: Callable[[dict[str, object]], str],
+    httpx_mock: HTTPXMock,
+) -> None:
+    import_dir = tmp_path / "import"
+    import_dir.mkdir()
+    dest_root = tmp_path / "dest"
+    cache_path = _authed_cache_path(tmp_path, make_jwt)
+    monkeypatch.setattr("teamgym_watcher.cli.token_cache_path", lambda: cache_path)
+    _mock_tags_endpoint(httpx_mock, _tags_response(), base_url=LOCAL_API_BASE_URL)
+
+    result = runner.invoke(
+        app,
+        [
+            "process-once",
+            "--non-interactive",
+            "--local",
+            "--stability-seconds",
+            "1",
+            *_required_args(import_dir, dest_root),
+        ],
+    )
+
+    assert result.exit_code == 0
+
+
 def test_process_once_exits_with_processing_error_code_when_errors_recorded(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -306,6 +347,61 @@ def test_auth_command_saves_token_and_prints_identity(
     assert result.exit_code == 0
     assert "octocat" in caplog.text
     assert cache_path.is_file()
+
+
+def test_auth_command_staging_flag_uses_staging_api_base_url(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_jwt: Callable[[dict[str, object]], str],
+) -> None:
+    import_dir = tmp_path / "import"
+    import_dir.mkdir()
+    dest_root = tmp_path / "dest"
+    cache_path = tmp_path / "token.json"
+    jwt = make_jwt({"login": "octocat", "exp": 10_000})
+    token = AccessToken(access_token=jwt, token_type="bearer", scope="")
+    captured: dict[str, str] = {}
+
+    def _run_device_flow(client: object, api_base_url: str) -> AccessToken:
+        captured["api_base_url"] = api_base_url
+        return token
+
+    monkeypatch.setattr("teamgym_watcher.cli.run_device_flow", _run_device_flow)
+    monkeypatch.setattr("teamgym_watcher.cli.token_cache_path", lambda: cache_path)
+
+    result = runner.invoke(
+        app,
+        ["auth", "--staging", *_required_args(import_dir, dest_root)],
+    )
+
+    assert result.exit_code == 0
+    assert captured["api_base_url"] == STAGING_API_BASE_URL
+
+
+def test_auth_command_defaults_to_prod_api_base_url(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_jwt: Callable[[dict[str, object]], str],
+) -> None:
+    import_dir = tmp_path / "import"
+    import_dir.mkdir()
+    dest_root = tmp_path / "dest"
+    cache_path = tmp_path / "token.json"
+    jwt = make_jwt({"login": "octocat", "exp": 10_000})
+    token = AccessToken(access_token=jwt, token_type="bearer", scope="")
+    captured: dict[str, str] = {}
+
+    def _run_device_flow(client: object, api_base_url: str) -> AccessToken:
+        captured["api_base_url"] = api_base_url
+        return token
+
+    monkeypatch.setattr("teamgym_watcher.cli.run_device_flow", _run_device_flow)
+    monkeypatch.setattr("teamgym_watcher.cli.token_cache_path", lambda: cache_path)
+
+    result = runner.invoke(app, ["auth", *_required_args(import_dir, dest_root)])
+
+    assert result.exit_code == 0
+    assert captured["api_base_url"] == PROD_API_BASE_URL
 
 
 def test_auth_command_exits_with_auth_error_code_on_failure(
