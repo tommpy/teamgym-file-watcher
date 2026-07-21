@@ -90,8 +90,11 @@ def tag_json(
 
 def paginated_tags_callback(tags: list[dict[str, Any]], *, page_size: int = 2) -> Any:
     """A pytest-httpx callback serving ``tags`` across real pages of ``page_size``, regardless
-    of the ``limit`` the client actually requested -- exercising :meth:`ApiClient.fetch_all_tags`
-    pagination loop for real, the way a server enforcing its own page cap would."""
+    of the ``limit`` the client actually requested -- exercising
+    :meth:`ApiClient.fetch_tags_window` pagination loop for real, the way a server enforcing
+    its own page cap would. Query parameters other than ``page`` are ignored here; this
+    callback is only responsible for exercising pagination assembly, not simulating real
+    server-side time-window filtering."""
 
     def _callback(request: httpx.Request) -> httpx.Response:
         page = int(request.url.params.get("page", "1"))

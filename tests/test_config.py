@@ -70,7 +70,6 @@ class TestBuildConfig:
             dest_root=dest_root,
             timezone=None,
             time_offset_seconds=0,
-            tag_refresh_seconds=60,
             stability_seconds=3,
             batch_size=25,
             dry_run=False,
@@ -164,7 +163,7 @@ class TestBuildConfig:
                 timezone="Not/AZone",
             )
 
-    @pytest.mark.parametrize("field", ["tag_refresh_seconds", "stability_seconds", "batch_size"])
+    @pytest.mark.parametrize("field", ["stability_seconds", "batch_size"])
     def test_non_positive_intervals_rejected(self, tmp_path: Path, field: str) -> None:
         import_dir, dest_root = _dirs(tmp_path)
 

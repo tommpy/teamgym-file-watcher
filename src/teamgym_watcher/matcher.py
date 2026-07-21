@@ -1,22 +1,11 @@
 """Port of ``BulkPhotoTagger.lua``'s photo->tag matching: ``performPhotoTagMatching`` and
 its ``isPhotoInTagTimeWindow`` window test.
 
-Two entry points, both built on the same window test so they can never disagree in
-practice (verified by property tests in ``tests/test_matcher.py``):
+One entry point, built on the window test:
 
 - :func:`match_batch` — the sorted-merge scan for a drained batch of photos, a direct port
   of the Lua's step-4 algorithm: a persistent tag index that only ever advances forward as
   photos are processed in increasing capture-time order, giving O(photos + tags) total work.
-- :func:`match_one` — a binary-search lookup for the streaming watcher path, where photos
-  arrive one at a time and there is no batch to amortise a scan across. It relies on the
-  API's documented invariant that a competition's tags never overlap in time (see
-  ``mapping.map_tags_to_metadata``'s docstring): under that invariant, the tag with the
-  greatest ``start_time`` not exceeding the photo's capture time is the only candidate
-  whose window can contain that instant -- except when one tag's ``end_time`` exactly
-  equals the next tag's ``start_time`` (a phase ending the instant the next one begins,
-  which the non-overlap guarantee does not rule out). At that exact boundary both tags'
-  windows contain the photo, and :func:`match_batch`'s scan-order tie-break always prefers
-  the earlier tag, so :func:`match_one` checks that one tag back too.
 
 Parity notes:
 
@@ -32,7 +21,6 @@ Parity notes:
 
 from __future__ import annotations
 
-from bisect import bisect_right
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -40,7 +28,6 @@ if TYPE_CHECKING:
     from datetime import datetime
 
     from teamgym_watcher.api import Tag
-    from teamgym_watcher.tag_cache import TagCache
 
 
 def _in_window(capture_time: datetime, tag: Tag) -> bool:
@@ -58,7 +45,7 @@ def match_batch[PhotoT](
 
     ``photos`` need not be pre-sorted -- they are sorted internally by capture time,
     exactly as the Lua's ``table.sort(sortedPhotos, ...)`` does. ``tags_sorted`` MUST
-    already be ascending by ``start_time``, as :attr:`TagCache.tags_sorted` provides.
+    already be ascending by ``start_time``, as :meth:`ApiClient.fetch_tags_window` provides.
     Yields one ``(photo, matched tag or None)`` pair per input photo, in ascending
     capture-time order.
     """
@@ -80,24 +67,3 @@ def match_batch[PhotoT](
                 break
             tag_index += 1
         yield photo, matched
-
-
-def match_one(capture_time: datetime, cache: TagCache) -> Tag | None:
-    """Binary-search equivalent of :func:`match_batch` for a single photo.
-
-    For the streaming watcher, which reacts to one file at a time rather than draining a
-    batch. See the module docstring for why this agrees with :func:`match_batch`, including
-    the touching-boundary tie-break.
-    """
-    tags_sorted = cache.tags_sorted
-    index = bisect_right(tags_sorted, capture_time, key=lambda tag: tag.start_time) - 1
-    if index < 0:
-        return None
-
-    if index > 0:
-        earlier = tags_sorted[index - 1]
-        if _in_window(capture_time, earlier):
-            return earlier
-
-    tag = tags_sorted[index]
-    return tag if _in_window(capture_time, tag) else None

@@ -23,7 +23,6 @@ from teamgym_watcher.api import (
 )
 
 API_BASE_URL = "http://api.test"
-FIRST_PAGE_PARAMS = {"page": "1", "limit": "100"}
 
 
 class FakeClock:
@@ -204,104 +203,171 @@ def _page_response(
 
 class TestApiClientGet:
     def test_success_returns_body(self, httpx_mock: HTTPXMock) -> None:
+        start = datetime(2024, 10, 5, 10, 0, tzinfo=UTC)
+        end = datetime(2024, 10, 5, 11, 0, tzinfo=UTC)
         httpx_mock.add_response(
             url=f"{API_BASE_URL}/tags",
-            match_params=FIRST_PAGE_PARAMS,
+            match_params={
+                "startTimeFrom": "2024-10-05T10:00:00+00:00",
+                "endTimeTo": "2024-10-05T11:00:00+00:00",
+                "includeOpen": "true",
+                "page": "1",
+                "limit": "100",
+            },
             json=_page_response([_tag_json()], page=1, limit=100, total=1, has_next=False),
         )
         client = ApiClient(API_BASE_URL, "tok")
 
-        tags = client.fetch_all_tags(123)
+        tags = client.fetch_tags_window(123, start, end)
 
         assert [tag.id for tag in tags] == [1]
 
     def test_retries_once_on_timeout_then_succeeds(self, httpx_mock: HTTPXMock) -> None:
+        start = datetime(2024, 10, 5, 10, 0, tzinfo=UTC)
+        end = datetime(2024, 10, 5, 11, 0, tzinfo=UTC)
+        params = {
+            "startTimeFrom": "2024-10-05T10:00:00+00:00",
+            "endTimeTo": "2024-10-05T11:00:00+00:00",
+            "includeOpen": "true",
+            "page": "1",
+            "limit": "100",
+        }
         httpx_mock.add_exception(
             httpx.ConnectTimeout("timed out"),
             url=f"{API_BASE_URL}/tags",
-            match_params=FIRST_PAGE_PARAMS,
+            match_params=params,
         )
         httpx_mock.add_response(
             url=f"{API_BASE_URL}/tags",
-            match_params=FIRST_PAGE_PARAMS,
+            match_params=params,
             json=_page_response([_tag_json()], page=1, limit=100, total=1, has_next=False),
         )
         clock = FakeClock()
         client = ApiClient(API_BASE_URL, "tok", sleep=clock.sleep)
 
-        tags = client.fetch_all_tags(123)
+        tags = client.fetch_tags_window(123, start, end)
 
         assert [tag.id for tag in tags] == [1]
         assert clock.sleeps == [2.0]
 
     def test_raises_after_exhausting_retry(self, httpx_mock: HTTPXMock) -> None:
+        start = datetime(2024, 10, 5, 10, 0, tzinfo=UTC)
+        end = datetime(2024, 10, 5, 11, 0, tzinfo=UTC)
         httpx_mock.add_exception(
             httpx.ConnectTimeout("timed out"),
             url=f"{API_BASE_URL}/tags",
-            match_params=FIRST_PAGE_PARAMS,
+            match_params={
+                "startTimeFrom": "2024-10-05T10:00:00+00:00",
+                "endTimeTo": "2024-10-05T11:00:00+00:00",
+                "includeOpen": "true",
+                "page": "1",
+                "limit": "100",
+            },
             is_reusable=True,
         )
         clock = FakeClock()
         client = ApiClient(API_BASE_URL, "tok", sleep=clock.sleep)
 
         with pytest.raises(ApiError):
-            client.fetch_all_tags(123)
+            client.fetch_tags_window(123, start, end)
 
         assert clock.sleeps == [2.0]
 
     def test_unauthorized_error_raises_unauthorized(self, httpx_mock: HTTPXMock) -> None:
+        start = datetime(2024, 10, 5, 10, 0, tzinfo=UTC)
+        end = datetime(2024, 10, 5, 11, 0, tzinfo=UTC)
         httpx_mock.add_response(
             url=f"{API_BASE_URL}/tags",
-            match_params=FIRST_PAGE_PARAMS,
+            match_params={
+                "startTimeFrom": "2024-10-05T10:00:00+00:00",
+                "endTimeTo": "2024-10-05T11:00:00+00:00",
+                "includeOpen": "true",
+                "page": "1",
+                "limit": "100",
+            },
             status_code=401,
             json={"success": False, "error": "Unauthorized", "message": "no token"},
         )
         client = ApiClient(API_BASE_URL, "tok")
 
         with pytest.raises(Unauthorized, match="no token"):
-            client.fetch_all_tags(123)
+            client.fetch_tags_window(123, start, end)
 
     def test_generic_error_raises_api_error(self, httpx_mock: HTTPXMock) -> None:
+        start = datetime(2024, 10, 5, 10, 0, tzinfo=UTC)
+        end = datetime(2024, 10, 5, 11, 0, tzinfo=UTC)
         httpx_mock.add_response(
             url=f"{API_BASE_URL}/tags",
-            match_params=FIRST_PAGE_PARAMS,
+            match_params={
+                "startTimeFrom": "2024-10-05T10:00:00+00:00",
+                "endTimeTo": "2024-10-05T11:00:00+00:00",
+                "includeOpen": "true",
+                "page": "1",
+                "limit": "100",
+            },
             status_code=400,
             json={"success": False, "error": "Validation failed", "message": "bad query"},
         )
         client = ApiClient(API_BASE_URL, "tok")
 
         with pytest.raises(ApiError, match="bad query"):
-            client.fetch_all_tags(123)
+            client.fetch_tags_window(123, start, end)
 
     def test_non_json_body_raises_api_error(self, httpx_mock: HTTPXMock) -> None:
+        start = datetime(2024, 10, 5, 10, 0, tzinfo=UTC)
+        end = datetime(2024, 10, 5, 11, 0, tzinfo=UTC)
         httpx_mock.add_response(
             url=f"{API_BASE_URL}/tags",
-            match_params=FIRST_PAGE_PARAMS,
+            match_params={
+                "startTimeFrom": "2024-10-05T10:00:00+00:00",
+                "endTimeTo": "2024-10-05T11:00:00+00:00",
+                "includeOpen": "true",
+                "page": "1",
+                "limit": "100",
+            },
             content=b"not json",
         )
         client = ApiClient(API_BASE_URL, "tok")
 
         with pytest.raises(ApiError, match="Invalid response"):
-            client.fetch_all_tags(123)
+            client.fetch_tags_window(123, start, end)
 
     def test_non_object_body_raises_api_error(self, httpx_mock: HTTPXMock) -> None:
+        start = datetime(2024, 10, 5, 10, 0, tzinfo=UTC)
+        end = datetime(2024, 10, 5, 11, 0, tzinfo=UTC)
         httpx_mock.add_response(
-            url=f"{API_BASE_URL}/tags", match_params=FIRST_PAGE_PARAMS, json=[1, 2, 3]
+            url=f"{API_BASE_URL}/tags",
+            match_params={
+                "startTimeFrom": "2024-10-05T10:00:00+00:00",
+                "endTimeTo": "2024-10-05T11:00:00+00:00",
+                "includeOpen": "true",
+                "page": "1",
+                "limit": "100",
+            },
+            json=[1, 2, 3],
         )
         client = ApiClient(API_BASE_URL, "tok")
 
         with pytest.raises(ApiError, match="expected a JSON object"):
-            client.fetch_all_tags(123)
+            client.fetch_tags_window(123, start, end)
 
     def test_context_manager_closes_owned_client(self, httpx_mock: HTTPXMock) -> None:
+        start = datetime(2024, 10, 5, 10, 0, tzinfo=UTC)
+        end = datetime(2024, 10, 5, 11, 0, tzinfo=UTC)
         httpx_mock.add_response(
             url=f"{API_BASE_URL}/tags",
-            match_params=FIRST_PAGE_PARAMS,
+            match_params={
+                "startTimeFrom": "2024-10-05T10:00:00+00:00",
+                "endTimeTo": "2024-10-05T11:00:00+00:00",
+                "includeOpen": "true",
+                "page": "1",
+                "limit": "100",
+            },
             json=_page_response([_tag_json()], page=1, limit=100, total=1, has_next=False),
         )
 
         with ApiClient(API_BASE_URL, "tok") as client:
-            tags = client.fetch_all_tags(123)
+            tags = client.fetch_tags_window(123, start, end)
 
         assert [tag.id for tag in tags] == [1]
         assert client._client.is_closed
@@ -314,110 +380,6 @@ class TestApiClientGet:
 
         assert not external_client.is_closed
         external_client.close()
-
-
-class TestFetchAllTags:
-    def test_assembles_pages_until_exhausted(self, httpx_mock: HTTPXMock) -> None:
-        httpx_mock.add_response(
-            url=f"{API_BASE_URL}/tags",
-            match_params={"page": "1", "limit": "100"},
-            json=_page_response(
-                [_tag_json(id=1, startTime="2024-10-05T10:00:00.000Z")],
-                page=1,
-                limit=100,
-                total=3,
-                has_next=True,
-            ),
-        )
-        httpx_mock.add_response(
-            url=f"{API_BASE_URL}/tags",
-            match_params={"page": "2", "limit": "100"},
-            json=_page_response(
-                [_tag_json(id=2, startTime="2024-10-05T11:00:00.000Z")],
-                page=2,
-                limit=100,
-                total=3,
-                has_next=True,
-            ),
-        )
-        httpx_mock.add_response(
-            url=f"{API_BASE_URL}/tags",
-            match_params={"page": "3", "limit": "100"},
-            json=_page_response(
-                [_tag_json(id=3, startTime="2024-10-05T09:00:00.000Z")],
-                page=3,
-                limit=100,
-                total=3,
-                has_next=False,
-            ),
-        )
-        client = ApiClient(API_BASE_URL, "tok")
-
-        tags = client.fetch_all_tags(123)
-
-        assert [tag.id for tag in tags] == [3, 1, 2]
-
-    def test_filters_out_other_competitions(self, httpx_mock: HTTPXMock) -> None:
-        httpx_mock.add_response(
-            url=f"{API_BASE_URL}/tags",
-            match_params=FIRST_PAGE_PARAMS,
-            json=_page_response(
-                [
-                    _tag_json(id=1, competition={"id": 123, "name": "A", "type": "INTERNATIONAL"}),
-                    _tag_json(id=2, competition={"id": 999, "name": "B", "type": "INTERNATIONAL"}),
-                ],
-                page=1,
-                limit=100,
-                total=2,
-                has_next=False,
-            ),
-        )
-        client = ApiClient(API_BASE_URL, "tok")
-
-        tags = client.fetch_all_tags(123)
-
-        assert [tag.id for tag in tags] == [1]
-
-    def test_unparseable_tag_is_skipped_not_fatal(self, httpx_mock: HTTPXMock) -> None:
-        bad = _tag_json(id=1)
-        del bad["startTime"]
-        good = _tag_json(id=2)
-        httpx_mock.add_response(
-            url=f"{API_BASE_URL}/tags",
-            match_params=FIRST_PAGE_PARAMS,
-            json=_page_response([bad, good], page=1, limit=100, total=2, has_next=False),
-        )
-        client = ApiClient(API_BASE_URL, "tok")
-
-        tags = client.fetch_all_tags(123)
-
-        assert [tag.id for tag in tags] == [2]
-
-    def test_non_object_data_entry_is_skipped_not_fatal(self, httpx_mock: HTTPXMock) -> None:
-        httpx_mock.add_response(
-            url=f"{API_BASE_URL}/tags",
-            match_params=FIRST_PAGE_PARAMS,
-            json=_page_response(
-                ["not-a-tag", _tag_json(id=2)], page=1, limit=100, total=2, has_next=False
-            ),
-        )
-        client = ApiClient(API_BASE_URL, "tok")
-
-        tags = client.fetch_all_tags(123)
-
-        assert [tag.id for tag in tags] == [2]
-
-    def test_missing_data_key_yields_no_tags(self, httpx_mock: HTTPXMock) -> None:
-        httpx_mock.add_response(
-            url=f"{API_BASE_URL}/tags",
-            match_params=FIRST_PAGE_PARAMS,
-            json={"meta": {"page": 1, "limit": 100, "hasNext": False}},
-        )
-        client = ApiClient(API_BASE_URL, "tok")
-
-        tags = client.fetch_all_tags(123)
-
-        assert tags == []
 
 
 class TestFetchTagsWindow:

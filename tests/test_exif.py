@@ -217,8 +217,7 @@ class TestTimeOffsetSeconds:
         """A photo timestamped exactly one second after a tag's end boundary; the
         camera-skew correction pulls it back inside the window."""
         from teamgym_watcher.api import Competition, Tag
-        from teamgym_watcher.matcher import match_one
-        from teamgym_watcher.tag_cache import TagCache
+        from teamgym_watcher.matcher import match_batch
 
         tag_end = datetime(2026, 7, 20, 20, 6, 30, tzinfo=UTC)
         tag = Tag(
@@ -235,13 +234,6 @@ class TestTimeOffsetSeconds:
             award=None,
             competition=Competition(name="X", type="INTERNATIONAL"),
         )
-        cache = TagCache(1, tag_refresh_seconds=60)
-
-        class _Fetcher:
-            def fetch_all_tags(self, competition_id: int) -> list[Tag]:
-                return [tag]
-
-        cache.refresh(_Fetcher())
 
         photo = _make_jpeg(
             tmp_path / "boundary.jpg",
@@ -250,10 +242,12 @@ class TestTimeOffsetSeconds:
         )
 
         unshifted = extract_capture_time(photo, _config(time_offset_seconds=0))
-        assert match_one(unshifted.utc, cache) is None
+        ((_, unshifted_match),) = list(match_batch([("photo", unshifted.utc)], [tag]))
+        assert unshifted_match is None
 
         shifted = extract_capture_time(photo, _config(time_offset_seconds=-1))
-        assert match_one(shifted.utc, cache) == tag
+        ((_, shifted_match),) = list(match_batch([("photo", shifted.utc)], [tag]))
+        assert shifted_match == tag
 
 
 class TestDstTransition:

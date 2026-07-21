@@ -15,13 +15,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
-from pytest_httpx import HTTPXMock
 from typer.testing import CliRunner
 
 from teamgym_watcher import __version__
 from teamgym_watcher.auth import AccessToken, AuthError, save_token_cache
 from teamgym_watcher.cli import (
-    API_ERROR_EXIT_CODE,
     AUTH_ERROR_EXIT_CODE,
     CONFIG_ERROR_EXIT_CODE,
     EXIFTOOL_ERROR_EXIT_CODE,
@@ -32,7 +30,6 @@ from teamgym_watcher.cli import (
     app,
 )
 from teamgym_watcher.config import (
-    LOCAL_API_BASE_URL,
     PROD_API_BASE_URL,
     STAGING_API_BASE_URL,
     Config,
@@ -41,7 +38,6 @@ from teamgym_watcher.exif import ExifToolUnavailableError, MissingCaptureTimeErr
 from teamgym_watcher.journal import Journal, JournalStatus, Stats
 from teamgym_watcher.mover import PhotoGroup
 from teamgym_watcher.pipeline import BatchResult, PipelineDeps, process_batch
-from teamgym_watcher.tag_cache import TagCache
 from teamgym_watcher.watcher import Watcher
 
 if TYPE_CHECKING:
@@ -70,17 +66,6 @@ def _tags_response(tags: list[dict[str, object]] | None = None) -> dict[str, obj
     return {"data": tags or [], "meta": {"hasNext": False}}
 
 
-def _mock_tags_endpoint(
-    httpx_mock: HTTPXMock, json: dict[str, object], base_url: str = API_BASE_URL
-) -> None:
-    httpx_mock.add_response(
-        method="GET",
-        url=f"{base_url}/tags",
-        match_params={"page": "1", "limit": "100"},
-        json=json,
-    )
-
-
 def _authed_cache_path(tmp_path: Path, make_jwt: Callable[[dict[str, object]], str]) -> Path:
     cache_path = tmp_path / "token.json"
     jwt = make_jwt({"login": "octocat", "exp": 10_000_000_000})
@@ -92,7 +77,7 @@ class _FakeApiClient:
     def __init__(self, tags: list[object] | None = None) -> None:
         self._tags = tags or []
 
-    def fetch_all_tags(self, competition_id: int) -> list[object]:
+    def fetch_tags_window(self, competition_id: int, start: object, end: object) -> list[object]:
         return list(self._tags)
 
 
@@ -114,15 +99,11 @@ def _pipeline_deps(
         dest_root=dest_root,
         batch_size=batch_size,
     )
-    cache = TagCache(1, tag_refresh_seconds=3600, clock=lambda: 100.0)
-    cache.refresh(_FakeApiClient([]))
     return PipelineDeps(
         config=config,
-        tag_cache=cache,
         api_client=_FakeApiClient([]),  # type: ignore[arg-type]
         journal=Journal(dest_root),
         stats=Stats(),
-        clock=lambda: 100.0,
         extract_capture_time=_always_missing_capture_time,  # type: ignore[arg-type]
     )
 
@@ -200,38 +181,16 @@ def test_exiftool_unavailable_exits_with_exiftool_error_code(
     assert result.exit_code == EXIFTOOL_ERROR_EXIT_CODE
 
 
-@pytest.mark.parametrize("command", ["run", "process-once"])
-def test_initial_tag_fetch_failure_exits_with_api_error_code(
-    command: str,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_jwt: Callable[[dict[str, object]], str],
-    httpx_mock: HTTPXMock,
-) -> None:
-    import_dir = tmp_path / "import"
-    import_dir.mkdir()
-    dest_root = tmp_path / "dest"
-    cache_path = _authed_cache_path(tmp_path, make_jwt)
-    monkeypatch.setattr("teamgym_watcher.cli.token_cache_path", lambda: cache_path)
-    _mock_tags_endpoint(httpx_mock, {"success": False, "error": "ServerError", "message": "boom"})
-
-    result = runner.invoke(app, [command, "--non-interactive", *_valid_args(import_dir, dest_root)])
-
-    assert result.exit_code == API_ERROR_EXIT_CODE
-
-
 def test_process_once_happy_path_drains_directory_and_exits_zero(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     make_jwt: Callable[[dict[str, object]], str],
-    httpx_mock: HTTPXMock,
 ) -> None:
     import_dir = tmp_path / "import"
     import_dir.mkdir()
     dest_root = tmp_path / "dest"
     cache_path = _authed_cache_path(tmp_path, make_jwt)
     monkeypatch.setattr("teamgym_watcher.cli.token_cache_path", lambda: cache_path)
-    _mock_tags_endpoint(httpx_mock, _tags_response())
     (import_dir / "IMG_0001.JPG").write_bytes(b"not a real jpeg")
 
     result = runner.invoke(
@@ -253,14 +212,12 @@ def test_process_once_local_flag_uses_local_api_base_url(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     make_jwt: Callable[[dict[str, object]], str],
-    httpx_mock: HTTPXMock,
 ) -> None:
     import_dir = tmp_path / "import"
     import_dir.mkdir()
     dest_root = tmp_path / "dest"
     cache_path = _authed_cache_path(tmp_path, make_jwt)
     monkeypatch.setattr("teamgym_watcher.cli.token_cache_path", lambda: cache_path)
-    _mock_tags_endpoint(httpx_mock, _tags_response(), base_url=LOCAL_API_BASE_URL)
 
     result = runner.invoke(
         app,
@@ -281,14 +238,12 @@ def test_process_once_exits_with_processing_error_code_when_errors_recorded(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     make_jwt: Callable[[dict[str, object]], str],
-    httpx_mock: HTTPXMock,
 ) -> None:
     import_dir = tmp_path / "import"
     import_dir.mkdir()
     dest_root = tmp_path / "dest"
     cache_path = _authed_cache_path(tmp_path, make_jwt)
     monkeypatch.setattr("teamgym_watcher.cli.token_cache_path", lambda: cache_path)
-    _mock_tags_endpoint(httpx_mock, _tags_response())
 
     def _fake_drain_once(watcher: Watcher, deps: PipelineDeps, **kwargs: object) -> bool:
         deps.stats.record(JournalStatus.ERROR)
@@ -307,14 +262,12 @@ def test_process_once_exits_with_auth_error_code_when_drain_pauses_for_auth(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     make_jwt: Callable[[dict[str, object]], str],
-    httpx_mock: HTTPXMock,
 ) -> None:
     import_dir = tmp_path / "import"
     import_dir.mkdir()
     dest_root = tmp_path / "dest"
     cache_path = _authed_cache_path(tmp_path, make_jwt)
     monkeypatch.setattr("teamgym_watcher.cli.token_cache_path", lambda: cache_path)
-    _mock_tags_endpoint(httpx_mock, _tags_response())
 
     monkeypatch.setattr("teamgym_watcher.cli._drain_once", lambda watcher, deps, **kw: True)
 

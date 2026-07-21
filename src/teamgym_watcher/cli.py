@@ -15,7 +15,7 @@ from rich.console import Console
 from rich.panel import Panel
 
 from teamgym_watcher import __version__
-from teamgym_watcher.api import ApiClient, ApiError
+from teamgym_watcher.api import ApiClient
 from teamgym_watcher.auth import (
     AuthError,
     decode_jwt_payload,
@@ -29,8 +29,12 @@ from teamgym_watcher.exif import ExifToolUnavailableError, ensure_exiftool_avail
 from teamgym_watcher.journal import Journal, Stats, StatsSnapshot
 from teamgym_watcher.log import setup_logging
 from teamgym_watcher.mover import group_files
-from teamgym_watcher.pipeline import PipelineDeps, format_summary_line, process_batch
-from teamgym_watcher.tag_cache import TagCache
+from teamgym_watcher.pipeline import (
+    CompetitionNameCache,
+    PipelineDeps,
+    format_summary_line,
+    process_batch,
+)
 from teamgym_watcher.watcher import Watcher
 
 if TYPE_CHECKING:
@@ -93,10 +97,6 @@ _TimezoneOption = Annotated[
 _TimeOffsetOption = Annotated[
     int,
     typer.Option("--time-offset-seconds", help="Camera clock-skew correction, in seconds."),
-]
-_TagRefreshOption = Annotated[
-    int,
-    typer.Option("--tag-refresh-seconds", help="How often to refresh the tag cache."),
 ]
 _StabilityOption = Annotated[
     int,
@@ -172,7 +172,6 @@ def _resolve_config(
     dest_root: Path,
     timezone: str | None,
     time_offset_seconds: int,
-    tag_refresh_seconds: int,
     stability_seconds: int,
     batch_size: int,
     dry_run: bool,
@@ -194,7 +193,6 @@ def _resolve_config(
             dest_root=dest_root,
             timezone=timezone,
             time_offset_seconds=time_offset_seconds,
-            tag_refresh_seconds=tag_refresh_seconds,
             stability_seconds=stability_seconds,
             batch_size=batch_size,
             dry_run=dry_run,
@@ -216,8 +214,8 @@ def _resolve_config(
 
 
 def _build_deps(cfg: Config, *, interactive: bool) -> PipelineDeps:
-    """Auth check + initial full tag fetch: everything ``run``/``process-once`` need before
-    they can start draining photos."""
+    """Auth check: everything ``run``/``process-once`` need before they can start draining
+    photos. The first API request is deferred until the first batch's ``fetch_tags_window``."""
     try:
         ensure_exiftool_available(cfg)
     except ExifToolUnavailableError as exc:
@@ -231,19 +229,13 @@ def _build_deps(cfg: Config, *, interactive: bool) -> PipelineDeps:
         raise typer.Exit(code=AUTH_ERROR_EXIT_CODE) from exc
 
     api_client = ApiClient(cfg.api_base_url, token)
-    tag_cache = TagCache(cfg.competition_id, tag_refresh_seconds=cfg.tag_refresh_seconds)
-    try:
-        tag_cache.refresh(api_client)
-    except ApiError as exc:
-        logger.error("Initial tag fetch failed: %s", exc)
-        raise typer.Exit(code=API_ERROR_EXIT_CODE) from exc
 
     return PipelineDeps(
         config=cfg,
-        tag_cache=tag_cache,
         api_client=api_client,
         journal=Journal(cfg.dest_root),
         stats=Stats(),
+        competition_name=CompetitionNameCache(),
     )
 
 
@@ -384,7 +376,6 @@ def run(
     staging: _StagingOption = False,
     timezone: _TimezoneOption = None,
     time_offset_seconds: _TimeOffsetOption = 0,
-    tag_refresh_seconds: _TagRefreshOption = 60,
     stability_seconds: _StabilityOption = 3,
     batch_size: _BatchSizeOption = 25,
     dry_run: _DryRunOption = False,
@@ -406,7 +397,6 @@ def run(
         dest_root=dest_root,
         timezone=timezone,
         time_offset_seconds=time_offset_seconds,
-        tag_refresh_seconds=tag_refresh_seconds,
         stability_seconds=stability_seconds,
         batch_size=batch_size,
         dry_run=dry_run,
@@ -446,7 +436,6 @@ def process_once(
     staging: _StagingOption = False,
     timezone: _TimezoneOption = None,
     time_offset_seconds: _TimeOffsetOption = 0,
-    tag_refresh_seconds: _TagRefreshOption = 60,
     stability_seconds: _StabilityOption = 3,
     batch_size: _BatchSizeOption = 25,
     dry_run: _DryRunOption = False,
@@ -468,7 +457,6 @@ def process_once(
         dest_root=dest_root,
         timezone=timezone,
         time_offset_seconds=time_offset_seconds,
-        tag_refresh_seconds=tag_refresh_seconds,
         stability_seconds=stability_seconds,
         batch_size=batch_size,
         dry_run=dry_run,
@@ -511,7 +499,6 @@ def auth(
     staging: _StagingOption = False,
     timezone: _TimezoneOption = None,
     time_offset_seconds: _TimeOffsetOption = 0,
-    tag_refresh_seconds: _TagRefreshOption = 60,
     stability_seconds: _StabilityOption = 3,
     batch_size: _BatchSizeOption = 25,
     dry_run: _DryRunOption = False,
@@ -531,7 +518,6 @@ def auth(
         dest_root=dest_root,
         timezone=timezone,
         time_offset_seconds=time_offset_seconds,
-        tag_refresh_seconds=tag_refresh_seconds,
         stability_seconds=stability_seconds,
         batch_size=batch_size,
         dry_run=dry_run,

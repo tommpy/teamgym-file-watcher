@@ -265,43 +265,6 @@ class ApiClient:
                 continue
             return _parse_response_body(response, url)
 
-    def fetch_all_tags(self, competition_id: int, *, limit: int = DEFAULT_PAGE_LIMIT) -> list[Tag]:
-        """Fetch every tag for ``competition_id``, following pagination until exhausted.
-
-        The ``/tags`` endpoint has no ``competitionId`` filter, so results are filtered
-        client-side, and sorted by ``startTime`` to feed the sorted-merge matcher (step 07).
-        A tag that fails to parse is logged and skipped rather than aborting the whole fetch,
-        so one malformed record never blocks all photo matching.
-        """
-        tags: list[Tag] = []
-        page = 1
-        while True:
-            body = self._get("/tags", {"page": page, "limit": limit})
-
-            raw_tags = body.get("data")
-            if not isinstance(raw_tags, list):
-                raw_tags = []
-            for raw_tag in raw_tags:
-                if not isinstance(raw_tag, dict):
-                    logger.warning("Skipping non-object tag entry: %r", raw_tag)
-                    continue
-                try:
-                    tag = parse_tag(raw_tag)
-                except TagParseError as exc:
-                    logger.warning("Skipping unparseable tag: %s", exc)
-                    continue
-                if tag.competition_id == competition_id:
-                    tags.append(tag)
-
-            meta = body.get("meta")
-            has_next = isinstance(meta, dict) and bool(meta.get("hasNext"))
-            if not has_next:
-                break
-            page += 1
-
-        tags.sort(key=lambda tag: tag.start_time)
-        return tags
-
     def fetch_tags_window(
         self,
         competition_id: int,

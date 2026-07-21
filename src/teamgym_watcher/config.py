@@ -30,7 +30,6 @@ class Config:
     dest_root: Path
     timezone: str | None = None
     time_offset_seconds: int = 0
-    tag_refresh_seconds: int = 60
     stability_seconds: int = 3
     batch_size: int = 25
     dry_run: bool = False
@@ -59,7 +58,6 @@ def build_config(
     dest_root: Path,
     timezone: str | None = None,
     time_offset_seconds: int = 0,
-    tag_refresh_seconds: int = 60,
     stability_seconds: int = 3,
     batch_size: int = 25,
     dry_run: bool = False,
@@ -67,7 +65,6 @@ def build_config(
     exiftool_path: str = "exiftool",
     recursive: bool = False,
 ) -> Config:
-    _validate_positive(tag_refresh_seconds, "tag_refresh_seconds")
     _validate_positive(stability_seconds, "stability_seconds")
     _validate_positive(batch_size, "batch_size")
     _validate_import_dir(import_dir)
@@ -82,7 +79,6 @@ def build_config(
         dest_root=dest_root,
         timezone=timezone,
         time_offset_seconds=time_offset_seconds,
-        tag_refresh_seconds=tag_refresh_seconds,
         stability_seconds=stability_seconds,
         batch_size=batch_size,
         dry_run=dry_run,
