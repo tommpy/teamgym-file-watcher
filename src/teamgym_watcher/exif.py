@@ -154,9 +154,22 @@ def _read_via_exiftool(path: Path, config: Config) -> tuple[str | None, str | No
     except (OSError, subprocess.SubprocessError) as exc:
         raise ExifToolUnavailableError(f"exiftool failed to read {path}: {exc}") from exc
 
-    parsed = json_loads(result.stdout)
-    entry = parsed[0] if parsed else {}
-    return entry.get("DateTimeOriginal"), entry.get("OffsetTimeOriginal")
+    try:
+        parsed = json_loads(result.stdout)
+    except ValueError as exc:
+        raise ExifToolUnavailableError(f"exiftool returned invalid JSON for {path}: {exc}") from exc
+    if not isinstance(parsed, list) or not parsed or not isinstance(parsed[0], dict):
+        raise ExifToolUnavailableError(
+            f"exiftool returned unexpected output for {path}: {result.stdout!r}"
+        )
+
+    entry = parsed[0]
+    raw_datetime = entry.get("DateTimeOriginal")
+    raw_offset = entry.get("OffsetTimeOriginal")
+    return (
+        raw_datetime if isinstance(raw_datetime, str) else None,
+        raw_offset if isinstance(raw_offset, str) else None,
+    )
 
 
 def _parse_exif_datetime(raw: str, path: Path) -> datetime:

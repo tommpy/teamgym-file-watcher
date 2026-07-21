@@ -330,6 +330,53 @@ class TestExiftoolFallback:
         assert result.utc == expected.astimezone(UTC)
         assert result.source is TimestampSource.PHOTO_OFFSET
 
+    def test_exiftool_invalid_json_output_raises_typed_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        photo = tmp_path / "raw.cr3"
+        photo.write_bytes(b"not a real cr3 file")
+        config = _config(exiftool_enabled=True)
+
+        def fake_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(args, 0, stdout="not json", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        with pytest.raises(ExifToolUnavailableError):
+            extract_capture_time(photo, config)
+
+    def test_exiftool_empty_list_output_raises_typed_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        photo = tmp_path / "raw.cr3"
+        photo.write_bytes(b"not a real cr3 file")
+        config = _config(exiftool_enabled=True)
+
+        def fake_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(args, 0, stdout="[]", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        with pytest.raises(ExifToolUnavailableError):
+            extract_capture_time(photo, config)
+
+    def test_exiftool_non_string_fields_are_treated_as_missing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        photo = tmp_path / "raw.cr3"
+        photo.write_bytes(b"not a real cr3 file")
+        config = _config(exiftool_enabled=True)
+
+        def fake_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(
+                args, 0, stdout='[{"DateTimeOriginal": 12345}]', stderr=""
+            )
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        with pytest.raises(MissingCaptureTimeError):
+            extract_capture_time(photo, config)
+
     def test_ensure_exiftool_available_is_a_noop_when_disabled(self) -> None:
         ensure_exiftool_available(_config(exiftool_enabled=False))
 

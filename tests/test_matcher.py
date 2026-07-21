@@ -105,6 +105,17 @@ class TestBoundarySemantics:
     def test_no_tags_at_all_does_not_match(self) -> None:
         assert _match_both(T0, []) is None
 
+    def test_touching_tags_at_shared_boundary_prefer_the_earlier_tag(self) -> None:
+        """One phase's end_time can equal the next phase's start_time exactly (e.g.
+        Qualification ending the instant Finals begins) -- the non-overlap guarantee
+        doesn't rule this out. Both tags' windows contain that instant; the Lua's scan
+        order means the earlier tag (encountered first) always wins the tie."""
+        boundary = T0 + timedelta(minutes=10)
+        tag_a = _tag(1, T0, boundary)
+        tag_b = _tag(2, boundary, T0 + timedelta(minutes=20))
+
+        assert _match_both(boundary, [tag_a, tag_b]) == tag_a
+
 
 class TestNonUtcOffsetsCompareByInstant:
     def test_photo_in_different_offset_representing_same_instant_still_matches(self) -> None:
@@ -137,10 +148,12 @@ class TestRandomisedAgreement:
     """DoD: 'batch vs streaming equivalence over randomised inputs'.
 
     Generates random *non-overlapping* tag sets (the invariant match_one relies on, per
-    its docstring, and which the sorter API guarantees per mapping.py) and random photo
-    times spanning before/inside/between/after them, then asserts match_batch and
-    match_one agree on every one. No hypothesis dependency: plain seeded `random` keeps
-    this deterministic without adding a new dependency.
+    its docstring, and which the sorter API guarantees per mapping.py) -- including some
+    that touch exactly at a shared boundary instant, which the non-overlap guarantee
+    permits and which match_one must tie-break the same way match_batch does -- and
+    random photo times spanning before/inside/between/after them, then asserts
+    match_batch and match_one agree on every one. No hypothesis dependency: plain seeded
+    `random` keeps this deterministic without adding a new dependency.
     """
 
     def _random_tags(self, rng: random.Random, count: int) -> list[Tag]:
@@ -152,7 +165,9 @@ class TestRandomisedAgreement:
             duration = timedelta(seconds=rng.randint(1, 10))
             end: datetime | None = start + duration
             tags.append(_tag(i, start, end))
-            cursor = start + duration + timedelta(seconds=1)
+            # Occasionally leave zero gap: the next tag touches this one's end exactly.
+            gap = 0 if rng.random() < 0.2 else 1
+            cursor = start + duration + timedelta(seconds=gap)
         if tags and rng.random() < 0.3:
             last = tags[-1]
             tags[-1] = _tag(last.id, last.start_time, None)

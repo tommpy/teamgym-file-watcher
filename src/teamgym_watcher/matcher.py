@@ -10,9 +10,13 @@ practice (verified by property tests in ``tests/test_matcher.py``):
 - :func:`match_one` — a binary-search lookup for the streaming watcher path, where photos
   arrive one at a time and there is no batch to amortise a scan across. It relies on the
   API's documented invariant that a competition's tags never overlap in time (see
-  ``mapping.map_tags_to_metadata``'s docstring): under that invariant, at most one tag's
-  window can ever contain a given instant, so the tag with the greatest ``start_time``
-  not exceeding the photo's capture time is the only candidate worth checking.
+  ``mapping.map_tags_to_metadata``'s docstring): under that invariant, the tag with the
+  greatest ``start_time`` not exceeding the photo's capture time is the only candidate
+  whose window can contain that instant -- except when one tag's ``end_time`` exactly
+  equals the next tag's ``start_time`` (a phase ending the instant the next one begins,
+  which the non-overlap guarantee does not rule out). At that exact boundary both tags'
+  windows contain the photo, and :func:`match_batch`'s scan-order tie-break always prefers
+  the earlier tag, so :func:`match_one` checks that one tag back too.
 
 Parity notes:
 
@@ -82,11 +86,18 @@ def match_one(capture_time: datetime, cache: TagCache) -> Tag | None:
     """Binary-search equivalent of :func:`match_batch` for a single photo.
 
     For the streaming watcher, which reacts to one file at a time rather than draining a
-    batch. See the module docstring for why this agrees with :func:`match_batch`.
+    batch. See the module docstring for why this agrees with :func:`match_batch`, including
+    the touching-boundary tie-break.
     """
     tags_sorted = cache.tags_sorted
     index = bisect_right(tags_sorted, capture_time, key=lambda tag: tag.start_time) - 1
     if index < 0:
         return None
+
+    if index > 0:
+        earlier = tags_sorted[index - 1]
+        if _in_window(capture_time, earlier):
+            return earlier
+
     tag = tags_sorted[index]
     return tag if _in_window(capture_time, tag) else None
