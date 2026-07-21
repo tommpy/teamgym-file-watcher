@@ -301,3 +301,53 @@ class ApiClient:
 
         tags.sort(key=lambda tag: tag.start_time)
         return tags
+
+    def fetch_tags_window(
+        self,
+        competition_id: int,
+        start: datetime,
+        end: datetime,
+        *,
+        limit: int = DEFAULT_PAGE_LIMIT,
+    ) -> list[Tag]:
+        """Fetch tags overlapping the capture-time window ``[start, end]``.
+
+        The sorter API applies ``startTimeFrom`` and ``endTimeTo`` together as an overlap test,
+        not as two independent one-sided bounds, so a tag is returned when its window intersects
+        the requested capture span. Open-ended tags are included with ``includeOpen=true``.
+        Results still need client-side competition filtering because ``/tags`` remains global
+        across competitions.
+        """
+        tags: list[Tag] = []
+        page = 1
+        params = {
+            "startTimeFrom": start.astimezone(UTC).isoformat(),
+            "endTimeTo": end.astimezone(UTC).isoformat(),
+            "includeOpen": "true",
+        }
+        while True:
+            body = self._get("/tags", {**params, "page": page, "limit": limit})
+
+            raw_tags = body.get("data")
+            if not isinstance(raw_tags, list):
+                raw_tags = []
+            for raw_tag in raw_tags:
+                if not isinstance(raw_tag, dict):
+                    logger.warning("Skipping non-object tag entry: %r", raw_tag)
+                    continue
+                try:
+                    tag = parse_tag(raw_tag)
+                except TagParseError as exc:
+                    logger.warning("Skipping unparseable tag: %s", exc)
+                    continue
+                if tag.competition_id == competition_id:
+                    tags.append(tag)
+
+            meta = body.get("meta")
+            has_next = isinstance(meta, dict) and bool(meta.get("hasNext"))
+            if not has_next:
+                break
+            page += 1
+
+        tags.sort(key=lambda tag: tag.start_time)
+        return tags
