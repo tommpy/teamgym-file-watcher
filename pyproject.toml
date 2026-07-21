@@ -46,3 +46,6 @@ strict = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "integration: end-to-end pipeline tests against tmp filesystem + faked API (slower; skip locally with -m \"not integration\")",
+]
