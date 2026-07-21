@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import tomllib
+from dataclasses import fields
 from pathlib import Path
 
 import pytest
 
 from teamgym_watcher.config import DEFAULT_CONFIG_FILENAME, Config, ConfigError, load_config
+
+EXAMPLE_TOML_PATH = Path(__file__).parent.parent / "teamgym-watcher.example.toml"
 
 VALID_TOML = """
 api_base_url = "http://localhost:3001/api"
@@ -36,6 +40,19 @@ def _dirs(tmp_path: Path) -> tuple[Path, Path]:
     dest_root = tmp_path / "dest"
     import_dir.mkdir()
     return import_dir, dest_root
+
+
+def _to_toml(values: dict[str, object]) -> str:
+    """Minimal str/int/bool-only TOML serialiser, for round-tripping a parsed example file."""
+    lines = []
+    for key, value in values.items():
+        if isinstance(value, bool):
+            lines.append(f"{key} = {'true' if value else 'false'}")
+        elif isinstance(value, int):
+            lines.append(f"{key} = {value}")
+        else:
+            lines.append(f'{key} = "{value}"')
+    return "\n".join(lines)
 
 
 class TestValidToml:
@@ -286,3 +303,34 @@ class TestValidationErrors:
                 config_path=None,
                 overrides=self._overrides(import_dir, dest_root, competition_id="not-an-int"),
             )
+
+
+class TestExampleToml:
+    """Guards against `teamgym-watcher.example.toml` drifting from `Config`'s fields."""
+
+    def test_every_config_field_is_documented(self) -> None:
+        text = EXAMPLE_TOML_PATH.read_text(encoding="utf-8")
+        toml_keys = set(tomllib.loads(text))
+        field_names = {f.name for f in fields(Config)}
+
+        # `timezone` is optional and shown commented-out (its default is "use the machine's
+        # own timezone"), so it won't appear as a live key -- it must still appear in the
+        # file text so a future field isn't silently dropped from the example entirely.
+        documented_but_commented = {"timezone"}
+        assert toml_keys | documented_but_commented == field_names
+        for name in documented_but_commented:
+            assert f"{name} = " in text, f"'{name}' has no documented (commented) example line"
+
+    def test_parses_and_loads_with_real_dirs(self, tmp_path: Path) -> None:
+        import_dir, dest_root = _dirs(tmp_path)
+        raw = tomllib.loads(EXAMPLE_TOML_PATH.read_text(encoding="utf-8"))
+        raw["import_dir"] = import_dir.as_posix()
+        raw["dest_root"] = dest_root.as_posix()
+
+        config_path = tmp_path / "teamgym-watcher.toml"
+        config_path.write_text(_to_toml(raw), encoding="utf-8")
+
+        cfg = load_config(config_path=config_path)
+
+        assert cfg.api_base_url == raw["api_base_url"]
+        assert cfg.competition_id == raw["competition_id"]

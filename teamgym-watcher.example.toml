@@ -40,3 +40,15 @@ batch_size = 25
 
 # When true, log every detection/match/move but never actually move files.
 dry_run = false
+
+# When true, also watch subdirectories of import_dir (e.g. per-card-reader subfolders),
+# not just its top level.
+recursive = false
+
+# When true, fall back to an external `exiftool` process for RAW formats exifread cannot
+# parse (currently just .cr3). Requires exiftool to be installed and on PATH (or pointed
+# to via exiftool_path).
+exiftool_enabled = false
+
+# Path to the exiftool binary, used only when exiftool_enabled is true.
+exiftool_path = "exiftool"

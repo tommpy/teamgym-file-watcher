@@ -49,3 +49,15 @@ testpaths = ["tests"]
 markers = [
     "integration: end-to-end pipeline tests against tmp filesystem + faked API (slower; skip locally with -m \"not integration\")",
 ]
+
+[tool.coverage.run]
+source = ["src/teamgym_watcher"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+# Overall floor. The parity-critical modules (mapping.py, hierarchy.py, matcher.py) have
+# their own stricter 90% floor enforced separately in CI via a scoped --cov-fail-under run
+# (see .github/workflows/ci.yml and prompts/rules/testing.md) since coverage.py has no
+# native per-module fail-under.
+fail_under = 85

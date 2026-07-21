@@ -34,3 +34,15 @@ jobs:
 
       - name: Test
         run: uv run pytest -q
+
+      - name: Coverage (parity-critical modules)
+        run: >-
+          uv run pytest -q
+          --cov=teamgym_watcher.mapping
+          --cov=teamgym_watcher.hierarchy
+          --cov=teamgym_watcher.matcher
+          --cov-report=term-missing
+          --cov-fail-under=90
+
+      - name: Coverage (overall)
+        run: uv run pytest -q --cov=teamgym_watcher --cov-report=term-missing --cov-fail-under=85
