@@ -242,11 +242,20 @@ def _start_device_flow(client: httpx.Client, api_base_url: str) -> DeviceAuthori
         raise AuthError(str(body.get("message", "Failed to start the device flow.")))
 
     data = body["data"]
+    user_code = data["userCode"]
+    verification_uri = data["verificationUri"]
+    # GitHub's device-code response only includes verification_uri_complete
+    # sometimes; when it's absent the sorter API's JSON serializer drops the
+    # key entirely rather than sending it as null. Per GitHub's own docs, the
+    # client is expected to build it itself in that case.
+    verification_uri_complete = data.get(
+        "verificationUriComplete", f"{verification_uri}?user_code={user_code}"
+    )
     return DeviceAuthorization(
         device_code=data["deviceCode"],
-        user_code=data["userCode"],
-        verification_uri=data["verificationUri"],
-        verification_uri_complete=data["verificationUriComplete"],
+        user_code=user_code,
+        verification_uri=verification_uri,
+        verification_uri_complete=verification_uri_complete,
         expires_in=data["expiresIn"],
         interval=data["interval"],
     )

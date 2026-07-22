@@ -286,6 +286,28 @@ class TestRunDeviceFlow:
         with httpx.Client() as client, pytest.raises(AuthError, match="not configured"):
             _run(client, clock)
 
+    def test_missing_verification_uri_complete_is_synthesized(
+        self, httpx_mock: HTTPXMock
+    ) -> None:
+        """GitHub's device-code response omits verification_uri_complete unless the
+        OAuth app supports it, and the sorter API's JSON serializer then drops the
+        key entirely rather than sending it as null. The client must fall back to
+        building it from verificationUri + userCode instead of raising a KeyError."""
+        start_body = _start_body(user_code="ABCD-EFGH")
+        del start_body["data"]["verificationUriComplete"]  # type: ignore[index]
+        httpx_mock.add_response(
+            method="POST", url=f"{API_BASE_URL}/device/start", json=start_body
+        )
+        httpx_mock.add_response(
+            method="POST", url=f"{API_BASE_URL}/device/poll", json=_poll_success_body()
+        )
+        clock = FakeClock()
+
+        with httpx.Client() as client:
+            token = _run(client, clock)
+
+        assert token.access_token == "jwt-token"
+
     def test_poll_failure_with_400_status_raises_auth_error(self, httpx_mock: HTTPXMock) -> None:
         """/device/poll returns 400 for an invalid device code; must not raise
         httpx.HTTPStatusError."""
