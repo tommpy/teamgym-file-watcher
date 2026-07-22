@@ -39,10 +39,9 @@ logic).
 ```
 teamgym_watcher/
   cli.py          # Typer CLI: run / process-once / auth / dry-run flags
-  config.py       # TOML config + CLI overrides (import_dir, dest_root, api_url, competition_id, tz fallback)
+  config.py       # CLI-only defaults + environment URL resolution (--local/--staging/--api-base-url)
   auth.py         # GitHub OAuth device flow (RFC 8628) against sorter API; token cache in platformdirs
   api.py          # httpx client: paginated tag fetch, retry w/ backoff (Lambda cold starts)
-  tag_cache.py    # Fetch ALL tags for the competition once; periodic refresh; sorted container
   mapping.py      # Port of MetadataMapper.lua (enum maps, nationality maps, olympic-code reverse map)
   hierarchy.py    # Port of PhotoCollectionHierarchy.lua path derivation (phase-based) + sanitisation
   exif.py         # Capture time + timezone from photo metadata (source of truth = the photo)
@@ -60,13 +59,15 @@ mapper is the bridge between API tags and folder names, exactly as in the plugin
 
 ## Key decisions
 
-**Batching / API economy.** Do NOT query the API per photo. On startup (and every
-`tag_refresh_seconds`, default 60), fetch *all* tags for the configured competition via the
-paginated `GET /api/tags` endpoint into an in-memory cache sorted by `startTime`. Photo→tag
-matching is then a purely local sorted-merge (same algorithm as `BulkPhotoTagger.lua`).
-30,000 photos ≈ a handful of API calls per hour regardless of volume. Photos are drained from
-the watch queue in batches (default 25) so log output and journal writes are chunked, but
-per-photo latency stays low.
+**Batching / API economy.** Do NOT query the API per photo. Photos are drained from the watch
+queue in batches (default 25). For each batch, one `fetch_tags_window` call is made, scoped
+to that batch's own photos' capture-time span (`[min_capture_time, max_capture_time]` — no
+padding needed). Why no padding? The sorter API's `startTimeFrom`+`endTimeTo` filter is an
+overlap test, not two independent bounds: a tag is returned if its window overlaps the query
+range at all, so the exact photo span already catches tags that started earlier or whose end
+is still open. This replaces the old whole-competition snapshot + `tag_refresh_seconds`
+periodic refresh entirely — there is no background cache thread, and no `tag_refresh_seconds`
+setting. 30,000 photos ≈ a handful of API calls per hour regardless of volume.
 
 **Timestamps & timezones.** The photo is the source of truth. Read `DateTimeOriginal` plus
 `OffsetTimeOriginal` (EXIF 2.31) when present; when absent, apply the configured fallback
@@ -85,6 +86,14 @@ first missing level, Awards and Flat phase handling, "ClubName - TeamName" and
 ("PodiumTraining" → "Podium Training", etc.). Path on disk:
 `<dest_root>/Competitions/<Competition>/<...segments...>/<file>`.
 Unmatched photos flow through the same rules → they land in `Random` folders, same as the plugin.
+
+**`untagged` fallback folder.** If *no* competition name has been resolved yet in the current
+run (no tag has matched any photo so far), the `Competitions/<Competition>/...` root cannot
+be constructed. In that case the file is placed in `<dest_root>/untagged/` instead of
+`Random`. Once at least one tag match has been seen and a competition name is known, all
+subsequent unmatched photos go to the normal `Random` folder as usual. This situation arises
+because per-batch windowed queries mean the first few batches may all pre-date the earliest
+open tag — a consequence documented in `docs/deviations.md`.
 
 **File handling.** Mixed inputs (JPEG, RAW, RAW+JPEG pairs). Files are never modified —
 only moved. Companion files sharing a basename (RAW+JPEG, any pre-existing sidecar) are

@@ -26,72 +26,72 @@ pipx install .
 teamgym-watcher --help
 ```
 
-1. Copy the example config and fill in your competition's details:
+1. Authenticate once (see [Auth](#auth) below):
 
    ```bash
-   cp teamgym-watcher.example.toml teamgym-watcher.toml
+   uv run teamgym-watcher auth --competition-id 42 --import-dir /path/to/import --dest-root /path/to/dest
    ```
 
-   At minimum, set `api_base_url`, `competition_id`, `import_dir` (must already exist), and
-   `dest_root`. See the [config reference](#config-reference) below for every setting.
-
-2. Authenticate once (see [Auth](#auth) below):
+2. Do a dry run first to see what would happen without touching any files:
 
    ```bash
-   uv run teamgym-watcher auth --config teamgym-watcher.toml
+   uv run teamgym-watcher run \
+     --competition-id 42 \
+     --import-dir /path/to/import \
+     --dest-root /path/to/dest \
+     --dry-run
    ```
 
-3. Do a dry run first to see what would happen without touching any files:
+3. Watch for real:
 
    ```bash
-   uv run teamgym-watcher run --config teamgym-watcher.toml --dry-run
+   uv run teamgym-watcher run \
+     --competition-id 42 \
+     --import-dir /path/to/import \
+     --dest-root /path/to/dest
    ```
 
-4. Watch for real:
-
-   ```bash
-   uv run teamgym-watcher run --config teamgym-watcher.toml
-   ```
-
-   Or drain whatever's currently in the import directory once and exit (useful for catch-up,
+4. Or drain whatever's currently in the import directory once and exit (useful for catch-up,
    or for re-running after `teamgym-watcher` was offline):
 
    ```bash
-   uv run teamgym-watcher process-once --config teamgym-watcher.toml
+   uv run teamgym-watcher process-once \
+     --competition-id 42 \
+     --import-dir /path/to/import \
+     --dest-root /path/to/dest
    ```
 
-Every setting in the TOML file can also be overridden per-invocation with the matching CLI
-option, e.g. `--competition-id 42`. Run `teamgym-watcher run --help` for the full list.
+All settings are passed as CLI flags; there is no config file. Run
+`teamgym-watcher run --help` for the full list.
 
-## Config reference
+## CLI reference
 
-Settings live in a TOML file (default `teamgym-watcher.toml` in the current directory, or
-pass `--config /path/to/file.toml`). See
-[`teamgym-watcher.example.toml`](teamgym-watcher.example.toml) for a filled-in template with
-inline comments.
+All settings are passed as CLI flags — there is no config file. Required flags must be
+provided on every invocation (or set as shell aliases/wrapper scripts).
 
-| Setting | Type | Default | CLI override | Description |
-|---|---|---|---|---|
-| `api_base_url` | string | *required* | `--api-base-url` | Base URL of the teamgym-sorter API. |
-| `competition_id` | integer | *required* | `--competition-id` | Numeric id of the competition to fetch tags for. |
-| `import_dir` | path | *required* | `--import-dir` | Directory the watcher monitors for new photos. Must already exist. |
-| `dest_root` | path | *required* | `--dest-root` | Root directory photos are moved into, under `<dest_root>/Competitions/<Competition>/...`. Created automatically. |
-| `timezone` | string \| unset | machine's local timezone | `--timezone` | IANA timezone name (e.g. `Europe/London`) used when a photo has no embedded UTC offset. |
-| `time_offset_seconds` | integer | `0` | `--time-offset-seconds` | Added to (or subtracted from, if negative) each photo's capture time — corrects camera clock skew relative to the server. |
-| `tag_refresh_seconds` | integer | `60` | `--tag-refresh-seconds` | How often to re-fetch the full tag list for the competition from the API. |
-| `stability_seconds` | integer | `3` | `--stability-seconds` | How long a file's size must be unchanged before it's considered fully written and safe to process. |
-| `batch_size` | integer | `25` | `--batch-size` | How many stable files to drain from the watch queue per processing batch. |
-| `dry_run` | boolean | `false` | `--dry-run` / `--no-dry-run` | When true, log every detection/match/move but never actually move files. |
-| `recursive` | boolean | `false` | — (TOML only) | When true, also watch subdirectories of `import_dir`, not just its top level. |
-| `exiftool_enabled` | boolean | `false` | — (TOML only) | When true, fall back to an external `exiftool` process for RAW formats `exifread` cannot parse (currently just `.cr3`). |
-| `exiftool_path` | string | `"exiftool"` | — (TOML only) | Path to the `exiftool` binary, used only when `exiftool_enabled` is true. |
+| Flag | Default | Description |
+|---|---|---|
+| `--competition-id INT` | *required* | Numeric id of the competition to fetch tags for. |
+| `--import-dir PATH` | *required* | Directory the watcher monitors for new photos. Must already exist. |
+| `--dest-root PATH` | *required* | Root directory photos are moved into, under `<dest_root>/Competitions/<Competition>/...`. Created automatically. |
+| `--api-base-url URL` | production API | Override API base URL directly; takes precedence over `--local`/`--staging`. |
+| `--local` | off | Use local dev API (`http://localhost:3001/api`). |
+| `--staging` | off | Use staging API (`https://api-staging.tagging.teamgymphotos.com/api`). |
+| (default, no flag) | production | Uses `https://api.tagging.teamgymphotos.com/api`. |
+| `--timezone TZ` | machine local zone | IANA timezone name (e.g. `Europe/London`) used when a photo has no embedded UTC offset. |
+| `--time-offset-seconds N` | `0` | Added to (or subtracted from) each photo's capture time — corrects camera clock skew. |
+| `--stability-seconds N` | `3` | How long a file's size must be unchanged before it's safe to process. |
+| `--batch-size N` | `25` | How many stable files to drain from the watch queue per processing batch. |
+| `--dry-run` / `--no-dry-run` | off | Log every detection/match/move but never actually move files. |
+| `--recursive` | off | Also watch subdirectories of `import_dir`, not just its top level. |
+| `--exiftool-enabled` | off | Fall back to an external `exiftool` process for RAW formats `exifread` cannot parse (e.g. `.cr3`). |
+| `--exiftool-path PATH` | `"exiftool"` | Path to the `exiftool` binary, used only when `--exiftool-enabled` is set. |
+| `--verbose` / `-v` | off | Enable debug logging. |
+| `--non-interactive` | off | (`run`/`process-once` only) Never prompt for re-auth; pause/fail instead. |
+| `--log-file PATH` | off | (`run`/`process-once` only) Also write logs to a rotating file. |
 
 `import_dir` and `dest_root` must be different directories, and neither may be nested inside
 the other.
-
-Other CLI-only flags (all commands): `--config`, `--verbose`/`-v`. `run` and `process-once`
-also take `--non-interactive` (never prompt for re-authentication; pause and log instead) and
-`--log-file` (also write logs to a rotating file).
 
 ## Auth
 
@@ -99,7 +99,7 @@ The CLI uses the same GitHub OAuth [device flow](https://datatracker.ietf.org/do
 as the Lightroom plugin:
 
 ```bash
-uv run teamgym-watcher auth --config teamgym-watcher.toml
+uv run teamgym-watcher auth --competition-id 42 --import-dir /path/to/import --dest-root /path/to/dest
 ```
 
 This prints a one-time code and a URL (e.g. `https://github.com/login/device`). Open the URL,
@@ -190,10 +190,10 @@ files untouched in the import directory — re-run it after authenticating.
 
 **Unsupported RAW format (e.g. `.cr3`).** `exifread` parses JPEG and TIFF-based RAW formats
 (NEF, CR2, ARW, DNG, ...) but not Canon's CR3 container. If you shoot CR3, install
-[exiftool](https://exiftool.org/) and set `exiftool_enabled = true` (and `exiftool_path` if
-it's not on `PATH`) in your config. Without this, CR3 files raise a startup error rather than
-silently mis-sorting. `EXIFTOOL_ONLY_EXTENSIONS` in `src/teamgym_watcher/exif.py` is the
-authoritative list if another such format turns up.
+[exiftool](https://exiftool.org/) and add `--exiftool-enabled` to your invocation (and
+`--exiftool-path /path/to/exiftool` if it's not on `PATH`). Without this, CR3 files raise a
+startup error rather than silently mis-sorting. `EXIFTOOL_ONLY_EXTENSIONS` in
+`src/teamgym_watcher/exif.py` is the authoritative list if another such format turns up.
 
 **Photos landing in `Random` when you expected a match.** Every photo's outcome is logged at
 info level, naming why it didn't fully match: no usable capture time, or no tag covering that
@@ -219,7 +219,7 @@ above everything else when it's present.
 - **Running as a background service.** `teamgym-watcher run` is a long-lived foreground
   process; wrap it with your platform's usual service mechanism if you want it to survive
   logout/reboot — [NSSM](https://nssm.cc/) or Task Scheduler on Windows, `launchd` (a user
-  `LaunchAgent` plist running `teamgym-watcher run --config ... --log-file ...`) on macOS.
+  `LaunchAgent` plist running `teamgym-watcher run --competition-id 42 --import-dir /path/to/import --dest-root /path/to/dest --log-file /path/to/teamgym-watcher.log`) on macOS.
 - **Case-insensitive filesystems.** Both platforms' default filesystems are
   case-insensitive; companion-file grouping and collision-safe moves are written to be safe
   under that (e.g. `IMG_0001.CR2` and `img_0001.jpg` are grouped as a pair, not treated as
@@ -233,7 +233,6 @@ src/teamgym_watcher/   Application source (see PLAN.md's Architecture section fo
 tests/                 pytest suite, including tests/integration/ end-to-end coverage
 samples/               Real Lightroom-written JPEGs used as EXIF extraction fixtures
 docs/                  building.md, verification.md, deviations.md, backlog.md
-teamgym-watcher.example.toml   Copy this to get started
 PLAN.md                Full design doc
 ```
 

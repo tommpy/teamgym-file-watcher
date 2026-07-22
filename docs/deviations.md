@@ -17,3 +17,18 @@ missing/empty club name, nothing added to `MapResult.warnings`. This is very lik
 oversight in the Lua (the warning is silently swallowed from the caller's point of view), but
 changing it would mean the Python port surfaces warnings the Lua never did for equivalent
 tags — a parity break — so it stays as-is.
+
+## `pipeline.py` — `untagged` fallback folder (no Lua equivalent)
+
+When no competition name has been resolved yet in the current run (no tag has matched any
+photo so far), the pipeline cannot construct a `Competitions/<Competition>/...` path.
+Instead it moves the file to `<dest_root>/untagged/`.
+
+The Lua plugin has no equivalent concept: it always has a full snapshot of every tag for the
+competition available at the start of a BulkPhotoTagger run, so the competition name can
+always be obtained from the matched tag (or the photo is simply left untagged in-catalog).
+The `untagged` folder is a direct consequence of the per-batch windowed query strategy: the
+first batch(es) may pre-date the earliest open tag in a fresh run, yielding no match and no
+name. The stated usage constraint — at least one tag is already open before the first
+photo is taken — keeps this rare in practice; the folder is easy to spot and re-sort after
+the run completes.

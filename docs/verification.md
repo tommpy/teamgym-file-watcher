@@ -30,7 +30,10 @@ competition/tag configuration you haven't verified before.
    log output, then run it for real:
 
    ```bash
-   uv run teamgym-watcher process-once --config teamgym-watcher.toml
+   uv run teamgym-watcher process-once \
+     --competition-id <id> \
+     --import-dir /path/to/import \
+     --dest-root /path/to/dest
    ```
 
    Record the resulting folder tree under `dest_root/Competitions/<Competition>/...` — e.g.
