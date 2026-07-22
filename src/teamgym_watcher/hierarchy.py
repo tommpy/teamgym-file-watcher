@@ -53,6 +53,7 @@ _AWARDS_PHASES: Final[frozenset[str]] = frozenset({"Awards"})
 _DISPLAY_NAME_SUBSTITUTIONS: Final[dict[str, str]] = {
     "PodiumTraining": "Podium Training",
     "CompetitionWarmup": "Competition Warmup",
+    "PodiumTrainingWarmup": "Podium Training Warmup",
     "OpeningCeremony": "Opening Ceremony",
     "QualificationWarmup": "Qualification Warmup",
 }
