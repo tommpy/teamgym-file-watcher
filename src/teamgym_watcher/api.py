@@ -19,6 +19,8 @@ from typing import TYPE_CHECKING, Any, Final
 
 import httpx
 
+from teamgym_watcher.auth import AuthError
+
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
@@ -213,19 +215,29 @@ def _parse_response_body(response: httpx.Response, url: str) -> dict[str, Any]:
 class ApiClient:
     """httpx-based client for the teamgym-sorter Tags API.
 
+    ``token`` is either a fixed bearer token string, or a zero-arg callable resolved fresh
+    before every request -- the watch loop passes ``auth.get_valid_token`` bound to its
+    config/cache path so a JWT silently refreshed mid-run (``auth.py``'s
+    ``refresh_access_token``) is actually picked up by subsequent requests, instead of the
+    client being stuck with whatever token it was constructed with. If resolving the token
+    raises :class:`~teamgym_watcher.auth.AuthError` (e.g.
+    :class:`~teamgym_watcher.auth.AuthenticationRequired` when non-interactive silent
+    refresh isn't possible), it's translated to :class:`Unauthorized` so callers only ever
+    need to handle the one "needs re-auth" signal.
+
     ``sleep`` is injectable so tests never perform a real sleep during the cold-start retry.
     """
 
     def __init__(
         self,
         base_url: str,
-        token: str,
+        token: str | Callable[[], str],
         *,
         client: httpx.Client | None = None,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self._base_url = base_url.rstrip("/")
-        self._token = token
+        self._token_provider: Callable[[], str] = token if callable(token) else lambda: token
         self._owns_client = client is None
         self._client = client if client is not None else httpx.Client(timeout=HTTP_TIMEOUT_SECONDS)
         self._sleep = sleep
@@ -242,7 +254,11 @@ class ApiClient:
 
     def _get(self, path: str, params: Mapping[str, str | int]) -> dict[str, Any]:
         url = f"{self._base_url}{path}"
-        headers = {"Authorization": f"Bearer {self._token}", "Accept": "application/json"}
+        try:
+            bearer_token = self._token_provider()
+        except AuthError as exc:
+            raise Unauthorized(str(exc)) from exc
+        headers = {"Authorization": f"Bearer {bearer_token}", "Accept": "application/json"}
 
         attempt = 1
         while True:

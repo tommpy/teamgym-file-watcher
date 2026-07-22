@@ -24,6 +24,7 @@ from teamgym_watcher.auth import (
     save_token_cache,
     token_cache_path,
 )
+from teamgym_watcher.auth import logout as revoke_refresh_token
 from teamgym_watcher.config import Config, ConfigError, build_config, resolve_api_base_url
 from teamgym_watcher.exif import ExifToolUnavailableError, ensure_exiftool_available
 from teamgym_watcher.journal import Journal, Stats, StatsSnapshot
@@ -207,9 +208,26 @@ def _resolve_config(
     return cfg
 
 
+def _resolve_auth_api_base_url(
+    *, verbose: bool, api_base_url: str | None, local: bool, staging: bool
+) -> str:
+    setup_logging(verbose=verbose, log_file=None)
+    try:
+        return resolve_api_base_url(local=local, staging=staging, api_base_url=api_base_url)
+    except ConfigError as exc:
+        logger.error("Configuration error: %s", exc)
+        raise typer.Exit(code=CONFIG_ERROR_EXIT_CODE) from exc
+
+
 def _build_deps(cfg: Config, *, interactive: bool) -> PipelineDeps:
     """Auth check: everything ``run``/``process-once`` need before they can start draining
-    photos. The first API request is deferred until the first batch's ``fetch_tags_window``."""
+    photos. The first API request is deferred until the first batch's ``fetch_tags_window``.
+
+    ``ApiClient`` is given a token-provider callback (re-calling ``get_valid_token``) rather
+    than a fixed token string, so a JWT silently refreshed hours into a long-running ``run``
+    is actually used by later requests instead of the client being stuck with the token it
+    was constructed with -- see ``docs/deviations.md``.
+    """
     try:
         ensure_exiftool_available(cfg)
     except ExifToolUnavailableError as exc:
@@ -217,12 +235,15 @@ def _build_deps(cfg: Config, *, interactive: bool) -> PipelineDeps:
         raise typer.Exit(code=EXIFTOOL_ERROR_EXIT_CODE) from exc
 
     try:
-        token = get_valid_token(cfg, interactive=interactive, cache_path=token_cache_path())
+        get_valid_token(cfg, interactive=interactive, cache_path=token_cache_path())
     except AuthError as exc:
         logger.error("Authentication failed: %s", exc)
         raise typer.Exit(code=AUTH_ERROR_EXIT_CODE) from exc
 
-    api_client = ApiClient(cfg.api_base_url, token)
+    def _token_provider() -> str:
+        return get_valid_token(cfg, interactive=interactive, cache_path=token_cache_path())
+
+    api_client = ApiClient(cfg.api_base_url, _token_provider)
 
     return PipelineDeps(
         config=cfg,
@@ -480,43 +501,19 @@ def process_once(
 
 @app.command()
 def auth(
-    import_dir: _ImportDirOption,
-    dest_root: _DestRootOption,
     verbose: _VerboseOption = False,
     api_base_url: _ApiBaseUrlOption = None,
     local: _LocalOption = False,
     staging: _StagingOption = False,
-    timezone: _TimezoneOption = None,
-    time_offset_seconds: _TimeOffsetOption = 0,
-    stability_seconds: _StabilityOption = 3,
-    batch_size: _BatchSizeOption = 25,
-    dry_run: _DryRunOption = False,
-    recursive: _RecursiveOption = False,
-    exiftool_enabled: _ExiftoolEnabledOption = False,
-    exiftool_path: _ExiftoolPathOption = "exiftool",
 ) -> None:
     """Force a fresh GitHub device-flow login, cache the JWT, and print the identity."""
-    cfg = _resolve_config(
-        verbose=verbose,
-        log_file=None,
-        api_base_url=api_base_url,
-        local=local,
-        staging=staging,
-        import_dir=import_dir,
-        dest_root=dest_root,
-        timezone=timezone,
-        time_offset_seconds=time_offset_seconds,
-        stability_seconds=stability_seconds,
-        batch_size=batch_size,
-        dry_run=dry_run,
-        recursive=recursive,
-        exiftool_enabled=exiftool_enabled,
-        exiftool_path=exiftool_path,
+    resolved_api_base_url = _resolve_auth_api_base_url(
+        verbose=verbose, api_base_url=api_base_url, local=local, staging=staging
     )
 
     with httpx.Client(timeout=30.0) as client:
         try:
-            token = run_device_flow(client, cfg.api_base_url)
+            token = run_device_flow(client, resolved_api_base_url)
             claims = decode_jwt_payload(token.access_token)
         except AuthError as exc:
             logger.error("Authentication failed: %s", exc)
@@ -526,6 +523,21 @@ def auth(
     logger.info(
         "Authenticated as %s <%s>.", claims.get("login", "unknown"), claims.get("email", "unknown")
     )
+
+
+@app.command()
+def logout(
+    verbose: _VerboseOption = False,
+    api_base_url: _ApiBaseUrlOption = None,
+    local: _LocalOption = False,
+    staging: _StagingOption = False,
+) -> None:
+    """Revoke the cached refresh token (best-effort) and clear the local token cache."""
+    resolved_api_base_url = _resolve_auth_api_base_url(
+        verbose=verbose, api_base_url=api_base_url, local=local, staging=staging
+    )
+    revoke_refresh_token(resolved_api_base_url, token_cache_path())
+    logger.info("Logged out; local token cache cleared.")
 
 
 if __name__ == "__main__":

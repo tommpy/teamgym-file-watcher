@@ -21,6 +21,7 @@ from teamgym_watcher.api import (
     Unauthorized,
     parse_tag,
 )
+from teamgym_watcher.auth import AuthenticationRequired
 
 API_BASE_URL = "http://api.test"
 
@@ -221,6 +222,57 @@ class TestApiClientGet:
         tags = client.fetch_tags_window(start, end)
 
         assert [tag.id for tag in tags] == [1]
+
+    def test_token_provider_is_resolved_fresh_before_each_request(
+        self, httpx_mock: HTTPXMock
+    ) -> None:
+        """A callable ``token`` (e.g. bound to ``auth.get_valid_token``) lets a token
+        silently refreshed mid-run actually reach later requests, instead of the client
+        being stuck with whatever bearer token it was constructed with."""
+        start = datetime(2024, 10, 5, 10, 0, tzinfo=UTC)
+        end = datetime(2024, 10, 5, 11, 0, tzinfo=UTC)
+        tokens = iter(["first-token", "second-token"])
+        seen_headers: list[str] = []
+
+        def response_callback(request: httpx.Request) -> httpx.Response:
+            seen_headers.append(request.headers["authorization"])
+            return httpx.Response(
+                200, json=_page_response([], page=1, limit=100, total=0, has_next=False)
+            )
+
+        httpx_mock.add_callback(
+            response_callback,
+            url=f"{API_BASE_URL}/tags",
+            match_params={
+                "startTimeFrom": "2024-10-05T10:00:00+00:00",
+                "endTimeTo": "2024-10-05T11:00:00+00:00",
+                "includeOpen": "true",
+                "page": "1",
+                "limit": "100",
+            },
+            is_reusable=True,
+        )
+        client = ApiClient(API_BASE_URL, lambda: next(tokens))
+
+        client.fetch_tags_window(start, end)
+        client.fetch_tags_window(start, end)
+
+        assert seen_headers == ["Bearer first-token", "Bearer second-token"]
+
+    def test_token_provider_auth_error_raises_unauthorized(self) -> None:
+        """auth.AuthError (e.g. AuthenticationRequired, raised when non-interactive silent
+        refresh isn't possible) must surface as the same Unauthorized signal a 401 from the
+        server would, so callers only ever handle one 're-auth needed' case."""
+        start = datetime(2024, 10, 5, 10, 0, tzinfo=UTC)
+        end = datetime(2024, 10, 5, 11, 0, tzinfo=UTC)
+
+        def _raise() -> str:
+            raise AuthenticationRequired("no cached token")
+
+        client = ApiClient(API_BASE_URL, _raise)
+
+        with pytest.raises(Unauthorized, match="no cached token"):
+            client.fetch_tags_window(start, end)
 
     def test_retries_once_on_timeout_then_succeeds(self, httpx_mock: HTTPXMock) -> None:
         start = datetime(2024, 10, 5, 10, 0, tzinfo=UTC)

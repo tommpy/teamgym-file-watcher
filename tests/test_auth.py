@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import json
 import logging
 import os
 import stat
@@ -26,6 +27,8 @@ from teamgym_watcher.auth import (
     get_valid_token,
     is_token_expired,
     load_token_cache,
+    logout,
+    refresh_access_token,
     run_device_flow,
     save_token_cache,
 )
@@ -82,14 +85,43 @@ def _start_body(
     }
 
 
-def _poll_success_body(token: str = "jwt-token") -> dict[str, object]:
-    return {
-        "success": True,
-        "data": {"accessToken": token, "tokenType": "bearer", "scope": "user:email"},
-    }
+def _poll_success_body(
+    token: str = "jwt-token",
+    *,
+    refresh_token: str | None = None,
+    refresh_token_expires_in: int | None = None,
+) -> dict[str, object]:
+    data: dict[str, object] = {"accessToken": token, "tokenType": "bearer", "scope": "user:email"}
+    if refresh_token is not None:
+        data["refreshToken"] = refresh_token
+    if refresh_token_expires_in is not None:
+        data["refreshTokenExpiresIn"] = refresh_token_expires_in
+    return {"success": True, "data": data}
 
 
 def _poll_error_body(error: str, message: str = "error") -> dict[str, object]:
+    return {"success": False, "error": error, "message": message}
+
+
+def _refresh_success_body(
+    *,
+    access_token: str = "new-jwt-token",
+    refresh_token: str = "new-refresh-token",
+    refresh_token_expires_in: int = 2_500_000,
+) -> dict[str, object]:
+    return {
+        "success": True,
+        "data": {
+            "accessToken": access_token,
+            "tokenType": "bearer",
+            "expiresIn": 3600,
+            "refreshToken": refresh_token,
+            "refreshTokenExpiresIn": refresh_token_expires_in,
+        },
+    }
+
+
+def _refresh_error_body(error: str, message: str = "error") -> dict[str, object]:
     return {"success": False, "error": error, "message": message}
 
 
@@ -119,6 +151,32 @@ class TestRunDeviceFlow:
             access_token="jwt-token", token_type="bearer", scope="user:email"
         )
         assert clock.sleeps == [5]
+
+    def test_poll_success_captures_refresh_token_fields(self, httpx_mock: HTTPXMock) -> None:
+        httpx_mock.add_response(
+            method="POST", url=f"{API_BASE_URL}/device/start", json=_start_body()
+        )
+        httpx_mock.add_response(
+            method="POST",
+            url=f"{API_BASE_URL}/device/poll",
+            json=_poll_success_body(
+                refresh_token="refresh-token-1", refresh_token_expires_in=2_592_000
+            ),
+        )
+        clock = FakeClock()
+
+        with httpx.Client() as client:
+            token = run_device_flow(
+                client,
+                API_BASE_URL,
+                console=_console(),
+                sleep=clock.sleep,
+                clock=clock.time,
+                now=lambda: 1_000.0,
+            )
+
+        assert token.refresh_token == "refresh-token-1"
+        assert token.refresh_token_expires_at == 1_000.0 + 2_592_000
 
     def test_authorization_pending_then_success(self, httpx_mock: HTTPXMock) -> None:
         httpx_mock.add_response(
@@ -325,6 +383,35 @@ class TestTokenCache:
 
         assert load_token_cache(path) is None
 
+    def test_round_trips_refresh_token_fields(self, tmp_path: Path) -> None:
+        path = tmp_path / "token.json"
+        token = AccessToken(
+            access_token="jwt-token",
+            token_type="bearer",
+            scope="user:email",
+            refresh_token="refresh-token-1",
+            refresh_token_expires_at=1_234_567.0,
+        )
+
+        save_token_cache(path, token)
+        loaded = load_token_cache(path)
+
+        assert loaded == token
+
+    def test_old_format_cache_without_refresh_fields_still_loads(self, tmp_path: Path) -> None:
+        path = tmp_path / "token.json"
+        path.write_text(
+            json.dumps({"accessToken": "jwt-token", "tokenType": "bearer", "scope": ""}),
+            encoding="utf-8",
+        )
+
+        loaded = load_token_cache(path)
+
+        assert loaded == AccessToken(access_token="jwt-token", token_type="bearer", scope="")
+        assert loaded is not None
+        assert loaded.refresh_token is None
+        assert loaded.refresh_token_expires_at is None
+
 
 class TestGetValidToken:
     def test_returns_cached_token_when_fresh(
@@ -385,6 +472,139 @@ class TestGetValidToken:
             access_token="jwt-token", token_type="bearer", scope="user:email"
         )
 
+    def test_expired_jwt_with_valid_refresh_token_refreshes_silently(
+        self,
+        tmp_path: Path,
+        httpx_mock: HTTPXMock,
+        make_jwt: Callable[[dict[str, object]], str],
+    ) -> None:
+        cache_path = tmp_path / "token.json"
+        stale = make_jwt({"exp": 1_000})
+        save_token_cache(
+            cache_path,
+            AccessToken(
+                access_token=stale,
+                token_type="bearer",
+                scope="user:email",
+                refresh_token="refresh-token-1",
+                refresh_token_expires_at=2_000_000.0,
+            ),
+        )
+        httpx_mock.add_response(
+            method="POST",
+            url=f"{API_BASE_URL}/device/refresh",
+            json=_refresh_success_body(access_token="new-jwt", refresh_token="refresh-token-2"),
+        )
+
+        token = get_valid_token(
+            _config(), interactive=False, cache_path=cache_path, now=lambda: 1_000.0
+        )
+
+        assert token == "new-jwt"
+        requests = httpx_mock.get_requests(url=f"{API_BASE_URL}/device/refresh")
+        assert len(requests) == 1
+        loaded = load_token_cache(cache_path)
+        assert loaded is not None
+        assert loaded.refresh_token == "refresh-token-2"  # rotated: old one is gone
+        assert loaded.access_token == "new-jwt"
+
+    def test_refresh_past_the_30_day_cap_is_not_attempted(
+        self,
+        tmp_path: Path,
+        httpx_mock: HTTPXMock,
+        make_jwt: Callable[[dict[str, object]], str],
+    ) -> None:
+        cache_path = tmp_path / "token.json"
+        stale = make_jwt({"exp": 1_000})
+        save_token_cache(
+            cache_path,
+            AccessToken(
+                access_token=stale,
+                token_type="bearer",
+                scope="",
+                refresh_token="refresh-token-1",
+                refresh_token_expires_at=999.0,  # already in the past at now=1_000.0
+            ),
+        )
+
+        with pytest.raises(AuthenticationRequired):
+            get_valid_token(
+                _config(), interactive=False, cache_path=cache_path, now=lambda: 1_000.0
+            )
+
+        assert httpx_mock.get_requests(url=f"{API_BASE_URL}/device/refresh") == []
+
+    def test_refresh_past_the_30_day_cap_runs_device_flow_when_interactive(
+        self,
+        tmp_path: Path,
+        httpx_mock: HTTPXMock,
+        make_jwt: Callable[[dict[str, object]], str],
+    ) -> None:
+        cache_path = tmp_path / "token.json"
+        stale = make_jwt({"exp": 1_000})
+        save_token_cache(
+            cache_path,
+            AccessToken(
+                access_token=stale,
+                token_type="bearer",
+                scope="",
+                refresh_token="refresh-token-1",
+                refresh_token_expires_at=999.0,
+            ),
+        )
+        httpx_mock.add_response(
+            method="POST", url=f"{API_BASE_URL}/device/start", json=_start_body()
+        )
+        httpx_mock.add_response(
+            method="POST", url=f"{API_BASE_URL}/device/poll", json=_poll_success_body()
+        )
+        clock = FakeClock()
+
+        token = get_valid_token(
+            _config(),
+            interactive=True,
+            cache_path=cache_path,
+            console=_console(),
+            sleep=clock.sleep,
+            clock=clock.time,
+            now=lambda: 1_000.0,
+        )
+
+        assert token == "jwt-token"
+        assert httpx_mock.get_requests(url=f"{API_BASE_URL}/device/refresh") == []
+
+    def test_refresh_invalid_grant_falls_back_to_non_interactive_raise(
+        self,
+        tmp_path: Path,
+        httpx_mock: HTTPXMock,
+        make_jwt: Callable[[dict[str, object]], str],
+    ) -> None:
+        cache_path = tmp_path / "token.json"
+        stale = make_jwt({"exp": 1_000})
+        save_token_cache(
+            cache_path,
+            AccessToken(
+                access_token=stale,
+                token_type="bearer",
+                scope="",
+                refresh_token="refresh-token-1",
+                refresh_token_expires_at=2_000_000.0,
+            ),
+        )
+        httpx_mock.add_response(
+            method="POST",
+            url=f"{API_BASE_URL}/device/refresh",
+            status_code=401,
+            json=_refresh_error_body("invalid_grant", "Refresh token has already been used."),
+        )
+
+        with pytest.raises(AuthenticationRequired):
+            get_valid_token(
+                _config(), interactive=False, cache_path=cache_path, now=lambda: 1_000.0
+            )
+
+        assert not cache_path.exists()
+
     def test_expired_cache_triggers_reauth_when_interactive(
         self,
         tmp_path: Path,
@@ -415,3 +635,163 @@ class TestGetValidToken:
             )
 
         assert token == "jwt-token"
+
+
+def _cached_token(**overrides: object) -> AccessToken:
+    base: dict[str, object] = {
+        "access_token": "stale-jwt",
+        "token_type": "bearer",
+        "scope": "user:email",
+        "refresh_token": "refresh-token-1",
+        "refresh_token_expires_at": 2_000_000.0,
+    }
+    base.update(overrides)
+    return AccessToken(**base)  # type: ignore[arg-type]
+
+
+class TestRefreshAccessToken:
+    def test_success_rotates_tokens_and_persists_the_new_pair(
+        self, tmp_path: Path, httpx_mock: HTTPXMock
+    ) -> None:
+        cache_path = tmp_path / "token.json"
+        cached = _cached_token()
+        save_token_cache(cache_path, cached)
+        httpx_mock.add_response(
+            method="POST",
+            url=f"{API_BASE_URL}/device/refresh",
+            json=_refresh_success_body(),
+            match_json={"refreshToken": "refresh-token-1"},
+        )
+
+        with httpx.Client() as client:
+            new_token = refresh_access_token(
+                _config(), cached, cache_path=cache_path, client=client, now=lambda: 1_000.0
+            )
+
+        assert new_token.access_token == "new-jwt-token"
+        assert new_token.refresh_token == "new-refresh-token"
+        assert new_token.refresh_token_expires_at == 1_000.0 + 2_500_000
+        assert new_token.scope == cached.scope  # RefreshResponse has no scope field
+        loaded = load_token_cache(cache_path)
+        assert loaded == new_token
+        assert loaded is not None
+        assert loaded.refresh_token != cached.refresh_token
+
+    def test_no_refresh_token_raises_authentication_required(self, tmp_path: Path) -> None:
+        cached = _cached_token(refresh_token=None, refresh_token_expires_at=None)
+
+        with pytest.raises(AuthenticationRequired):
+            refresh_access_token(_config(), cached, cache_path=tmp_path / "token.json")
+
+    def test_invalid_grant_raises_authentication_required_and_clears_cache(
+        self, tmp_path: Path, httpx_mock: HTTPXMock
+    ) -> None:
+        cache_path = tmp_path / "token.json"
+        cached = _cached_token()
+        save_token_cache(cache_path, cached)
+        httpx_mock.add_response(
+            method="POST",
+            url=f"{API_BASE_URL}/device/refresh",
+            status_code=401,
+            json=_refresh_error_body("invalid_grant", "Refresh token has already been used."),
+        )
+
+        with (
+            httpx.Client() as client,
+            pytest.raises(AuthenticationRequired, match="no longer valid"),
+        ):
+            refresh_access_token(_config(), cached, cache_path=cache_path, client=client)
+
+        assert not cache_path.exists()
+
+    def test_access_denied_raises_authentication_required_with_deauth_message_and_clears_cache(
+        self, tmp_path: Path, httpx_mock: HTTPXMock
+    ) -> None:
+        cache_path = tmp_path / "token.json"
+        cached = _cached_token()
+        save_token_cache(cache_path, cached)
+        httpx_mock.add_response(
+            method="POST",
+            url=f"{API_BASE_URL}/device/refresh",
+            status_code=403,
+            json=_refresh_error_body("access_denied", "User is no longer authorized."),
+        )
+
+        with (
+            httpx.Client() as client,
+            pytest.raises(AuthenticationRequired, match="no longer authorized"),
+        ):
+            refresh_access_token(_config(), cached, cache_path=cache_path, client=client)
+
+        assert not cache_path.exists()
+
+    def test_network_failure_surfaces_as_auth_error_not_authentication_required(
+        self, tmp_path: Path, httpx_mock: HTTPXMock
+    ) -> None:
+        cache_path = tmp_path / "token.json"
+        cached = _cached_token()
+        save_token_cache(cache_path, cached)
+        httpx_mock.add_exception(httpx.ConnectError("boom"))
+
+        with httpx.Client() as client, pytest.raises(AuthError) as exc_info:
+            refresh_access_token(_config(), cached, cache_path=cache_path, client=client)
+
+        assert not isinstance(exc_info.value, AuthenticationRequired)
+        assert load_token_cache(cache_path) == cached  # untouched by a transient failure
+
+    def test_parse_failure_surfaces_as_auth_error_not_authentication_required(
+        self, tmp_path: Path, httpx_mock: HTTPXMock
+    ) -> None:
+        cache_path = tmp_path / "token.json"
+        cached = _cached_token()
+        save_token_cache(cache_path, cached)
+        httpx_mock.add_response(
+            method="POST", url=f"{API_BASE_URL}/device/refresh", content=b"not json"
+        )
+
+        with httpx.Client() as client, pytest.raises(AuthError) as exc_info:
+            refresh_access_token(_config(), cached, cache_path=cache_path, client=client)
+
+        assert not isinstance(exc_info.value, AuthenticationRequired)
+
+
+class TestLogout:
+    def test_posts_cached_refresh_token_then_removes_cache_file(
+        self, tmp_path: Path, httpx_mock: HTTPXMock
+    ) -> None:
+        cache_path = tmp_path / "token.json"
+        save_token_cache(cache_path, _cached_token())
+        httpx_mock.add_response(
+            method="POST",
+            url=f"{API_BASE_URL}/device/logout",
+            json={"success": True},
+            match_json={"refreshToken": "refresh-token-1"},
+        )
+
+        with httpx.Client() as client:
+            logout(API_BASE_URL, cache_path, client=client)
+
+        assert not cache_path.exists()
+
+    def test_second_call_with_no_cache_is_a_no_op_success(
+        self, tmp_path: Path, httpx_mock: HTTPXMock
+    ) -> None:
+        cache_path = tmp_path / "token.json"  # never created
+
+        logout(API_BASE_URL, cache_path)  # must not raise, and must not attempt an HTTP call
+
+        assert not cache_path.exists()
+        assert httpx_mock.get_requests() == []
+
+    def test_server_failure_is_logged_but_cache_is_still_cleared(
+        self, tmp_path: Path, httpx_mock: HTTPXMock, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        cache_path = tmp_path / "token.json"
+        save_token_cache(cache_path, _cached_token())
+        httpx_mock.add_exception(httpx.ConnectError("boom"))
+
+        with caplog.at_level(logging.WARNING), httpx.Client() as client:
+            logout(API_BASE_URL, cache_path, client=client)
+
+        assert not cache_path.exists()
+        assert "failed to revoke" in caplog.text.lower()

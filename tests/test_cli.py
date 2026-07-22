@@ -109,7 +109,7 @@ def test_help_lists_all_subcommands() -> None:
     result = runner.invoke(app, ["--help"])
 
     assert result.exit_code == 0
-    for command in ("run", "process-once", "auth"):
+    for command in ("run", "process-once", "auth", "logout"):
         assert command in result.output
 
 
@@ -120,7 +120,7 @@ def test_version_option_prints_version_and_exits_zero() -> None:
     assert __version__ in result.output
 
 
-@pytest.mark.parametrize("command", ["run", "process-once", "auth"])
+@pytest.mark.parametrize("command", ["run", "process-once"])
 def test_local_and_staging_conflict_exits_with_config_error_code(
     command: str, caplog: pytest.LogCaptureFixture, tmp_path: Path
 ) -> None:
@@ -133,6 +133,16 @@ def test_local_and_staging_conflict_exits_with_config_error_code(
             app,
             [command, "--local", "--staging", *_required_args(import_dir, dest_root)],
         )
+
+    assert result.exit_code == CONFIG_ERROR_EXIT_CODE
+    assert "configuration error" in caplog.text.lower()
+
+
+def test_auth_local_and_staging_conflict_exits_with_config_error_code(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.ERROR):
+        result = runner.invoke(app, ["auth", "--local", "--staging"])
 
     assert result.exit_code == CONFIG_ERROR_EXIT_CODE
     assert "configuration error" in caplog.text.lower()
@@ -281,9 +291,6 @@ def test_auth_command_saves_token_and_prints_identity(
     make_jwt: Callable[[dict[str, object]], str],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    import_dir = tmp_path / "import"
-    import_dir.mkdir()
-    dest_root = tmp_path / "dest"
     cache_path = tmp_path / "token.json"
     jwt = make_jwt({"login": "octocat", "email": "octocat@example.com", "exp": 10_000})
     token = AccessToken(access_token=jwt, token_type="bearer", scope="user:email")
@@ -292,7 +299,7 @@ def test_auth_command_saves_token_and_prints_identity(
     monkeypatch.setattr("teamgym_watcher.cli.token_cache_path", lambda: cache_path)
 
     with caplog.at_level(logging.INFO):
-        result = runner.invoke(app, ["auth", *_valid_args(import_dir, dest_root)])
+        result = runner.invoke(app, ["auth", "--api-base-url", API_BASE_URL])
 
     assert result.exit_code == 0
     assert "octocat" in caplog.text
@@ -304,9 +311,6 @@ def test_auth_command_staging_flag_uses_staging_api_base_url(
     monkeypatch: pytest.MonkeyPatch,
     make_jwt: Callable[[dict[str, object]], str],
 ) -> None:
-    import_dir = tmp_path / "import"
-    import_dir.mkdir()
-    dest_root = tmp_path / "dest"
     cache_path = tmp_path / "token.json"
     jwt = make_jwt({"login": "octocat", "exp": 10_000})
     token = AccessToken(access_token=jwt, token_type="bearer", scope="")
@@ -319,10 +323,7 @@ def test_auth_command_staging_flag_uses_staging_api_base_url(
     monkeypatch.setattr("teamgym_watcher.cli.run_device_flow", _run_device_flow)
     monkeypatch.setattr("teamgym_watcher.cli.token_cache_path", lambda: cache_path)
 
-    result = runner.invoke(
-        app,
-        ["auth", "--staging", *_required_args(import_dir, dest_root)],
-    )
+    result = runner.invoke(app, ["auth", "--staging"])
 
     assert result.exit_code == 0
     assert captured["api_base_url"] == STAGING_API_BASE_URL
@@ -333,9 +334,6 @@ def test_auth_command_defaults_to_prod_api_base_url(
     monkeypatch: pytest.MonkeyPatch,
     make_jwt: Callable[[dict[str, object]], str],
 ) -> None:
-    import_dir = tmp_path / "import"
-    import_dir.mkdir()
-    dest_root = tmp_path / "dest"
     cache_path = tmp_path / "token.json"
     jwt = make_jwt({"login": "octocat", "exp": 10_000})
     token = AccessToken(access_token=jwt, token_type="bearer", scope="")
@@ -348,7 +346,7 @@ def test_auth_command_defaults_to_prod_api_base_url(
     monkeypatch.setattr("teamgym_watcher.cli.run_device_flow", _run_device_flow)
     monkeypatch.setattr("teamgym_watcher.cli.token_cache_path", lambda: cache_path)
 
-    result = runner.invoke(app, ["auth", *_required_args(import_dir, dest_root)])
+    result = runner.invoke(app, ["auth"])
 
     assert result.exit_code == 0
     assert captured["api_base_url"] == PROD_API_BASE_URL
@@ -357,20 +355,46 @@ def test_auth_command_defaults_to_prod_api_base_url(
 def test_auth_command_exits_with_auth_error_code_on_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    import_dir = tmp_path / "import"
-    import_dir.mkdir()
-    dest_root = tmp_path / "dest"
-
     def _raise(client: object, api_base_url: str) -> AccessToken:
         raise AuthError("Authorization was denied.")
 
     monkeypatch.setattr("teamgym_watcher.cli.run_device_flow", _raise)
 
     with caplog.at_level(logging.ERROR):
-        result = runner.invoke(app, ["auth", *_valid_args(import_dir, dest_root)])
+        result = runner.invoke(app, ["auth", "--api-base-url", API_BASE_URL])
 
     assert result.exit_code == AUTH_ERROR_EXIT_CODE
     assert "authentication failed" in caplog.text.lower()
+
+
+def test_logout_command_revokes_and_clears_the_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    cache_path = tmp_path / "token.json"
+    calls: list[tuple[str, Path]] = []
+
+    def _fake_logout(api_base_url: str, path: Path) -> None:
+        calls.append((api_base_url, path))
+
+    monkeypatch.setattr("teamgym_watcher.cli.revoke_refresh_token", _fake_logout)
+    monkeypatch.setattr("teamgym_watcher.cli.token_cache_path", lambda: cache_path)
+
+    with caplog.at_level(logging.INFO):
+        result = runner.invoke(app, ["logout", "--api-base-url", API_BASE_URL])
+
+    assert result.exit_code == 0
+    assert calls == [(API_BASE_URL, cache_path)]
+    assert "logged out" in caplog.text.lower()
+
+
+def test_logout_local_and_staging_conflict_exits_with_config_error_code(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.ERROR):
+        result = runner.invoke(app, ["logout", "--local", "--staging"])
+
+    assert result.exit_code == CONFIG_ERROR_EXIT_CODE
+    assert "configuration error" in caplog.text.lower()
 
 
 class TestDrainOnce:

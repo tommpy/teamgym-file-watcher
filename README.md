@@ -29,7 +29,7 @@ teamgym-watcher --help
 1. Authenticate once (see [Auth](#auth) below):
 
    ```bash
-   uv run teamgym-watcher auth --import-dir /path/to/import --dest-root /path/to/dest
+   uv run teamgym-watcher auth
    ```
 
 2. Do a dry run first to see what would happen without touching any files:
@@ -101,7 +101,7 @@ The CLI uses the same GitHub OAuth [device flow](https://datatracker.ietf.org/do
 as the Lightroom plugin:
 
 ```bash
-uv run teamgym-watcher auth --import-dir /path/to/import --dest-root /path/to/dest
+uv run teamgym-watcher auth
 ```
 
 This prints a one-time code and a URL (e.g. `https://github.com/login/device`). Open the URL,
