@@ -49,8 +49,6 @@ API_BASE_URL = "http://localhost:3001/api"
 
 def _required_args(import_dir: Path, dest_root: Path) -> list[str]:
     return [
-        "--competition-id",
-        "1",
         "--import-dir",
         str(import_dir),
         "--dest-root",
@@ -77,7 +75,7 @@ class _FakeApiClient:
     def __init__(self, tags: list[object] | None = None) -> None:
         self._tags = tags or []
 
-    def fetch_tags_window(self, competition_id: int, start: object, end: object) -> list[object]:
+    def fetch_tags_window(self, start: object, end: object) -> list[object]:
         return list(self._tags)
 
 
@@ -94,7 +92,6 @@ def _pipeline_deps(
     dest_root.mkdir(parents=True, exist_ok=True)
     config = Config(
         api_base_url="http://api.test",
-        competition_id=1,
         import_dir=resolved_import_dir,
         dest_root=dest_root,
         batch_size=batch_size,

@@ -267,7 +267,6 @@ class ApiClient:
 
     def fetch_tags_window(
         self,
-        competition_id: int,
         start: datetime,
         end: datetime,
         *,
@@ -278,8 +277,10 @@ class ApiClient:
         The sorter API applies ``startTimeFrom`` and ``endTimeTo`` together as an overlap test,
         not as two independent one-sided bounds, so a tag is returned when its window intersects
         the requested capture span. Open-ended tags are included with ``includeOpen=true``.
-        Results still need client-side competition filtering because ``/tags`` remains global
-        across competitions.
+        ``/tags`` is global across competitions and there is no server-side competition filter,
+        but a photo's capture-time span only ever overlaps the one competition actually running
+        at that time, so the caller never needs to name a competition id up front -- the
+        matched tag's own ``competition`` field is what names the competition afterwards.
         """
         tags: list[Tag] = []
         page = 1
@@ -303,8 +304,7 @@ class ApiClient:
                 except TagParseError as exc:
                     logger.warning("Skipping unparseable tag: %s", exc)
                     continue
-                if tag.competition_id == competition_id:
-                    tags.append(tag)
+                tags.append(tag)
 
             meta = body.get("meta")
             has_next = isinstance(meta, dict) and bool(meta.get("hasNext"))

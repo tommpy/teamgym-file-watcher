@@ -42,9 +42,7 @@ def _utc_now() -> datetime:
 
 
 class _TagWindowFetcher(Protocol):
-    def fetch_tags_window(
-        self, competition_id: int, start: datetime, end: datetime
-    ) -> list[Tag]: ...
+    def fetch_tags_window(self, start: datetime, end: datetime) -> list[Tag]: ...
 
 
 class CompetitionNameCache:
@@ -219,9 +217,7 @@ def process_batch(groups: Iterable[PhotoGroup], deps: PipelineDeps) -> BatchResu
         window_start = min(ct for _, ct in groups_with_time)
         window_end = max(ct for _, ct in groups_with_time)
         try:
-            tags = deps.api_client.fetch_tags_window(
-                deps.config.competition_id, window_start, window_end
-            )
+            tags = deps.api_client.fetch_tags_window(window_start, window_end)
         except Unauthorized:
             logger.debug(
                 "Authentication required; pausing batch with %d group(s) pending", len(group_list)

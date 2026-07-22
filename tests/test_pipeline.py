@@ -43,10 +43,10 @@ class FakeApiClient:
 
     def __init__(self, tags: list[Tag]) -> None:
         self._tags = tags
-        self.calls: list[tuple[int, datetime, datetime]] = []
+        self.calls: list[tuple[datetime, datetime]] = []
 
-    def fetch_tags_window(self, competition_id: int, start: datetime, end: datetime) -> list[Tag]:
-        self.calls.append((competition_id, start, end))
+    def fetch_tags_window(self, start: datetime, end: datetime) -> list[Tag]:
+        self.calls.append((start, end))
         return list(self._tags)
 
 
@@ -54,7 +54,7 @@ class UnauthorizedApiClient:
     def __init__(self) -> None:
         self.calls = 0
 
-    def fetch_tags_window(self, competition_id: int, start: datetime, end: datetime) -> list[Tag]:
+    def fetch_tags_window(self, start: datetime, end: datetime) -> list[Tag]:
         self.calls += 1
         raise Unauthorized("token expired")
 
@@ -66,7 +66,6 @@ def _config(tmp_path: Path, *, dry_run: bool = False) -> Config:
     dest_root.mkdir(exist_ok=True)
     return Config(
         api_base_url="http://localhost/api",
-        competition_id=1,
         import_dir=import_dir,
         dest_root=dest_root,
         dry_run=dry_run,
@@ -278,7 +277,7 @@ class TestPerBatchFetch:
         process_batch(groups, deps)
 
         assert len(api_client.calls) == 1
-        _comp_id, window_start, window_end = api_client.calls[0]
+        window_start, window_end = api_client.calls[0]
         assert window_start == early
         assert window_end == late
 
@@ -365,7 +364,7 @@ class TestPerBatchFetch:
 
         # fetch is called using only the good group's time as both start and end
         assert len(api_client.calls) == 1
-        _, window_start, window_end = api_client.calls[0]
+        window_start, window_end = api_client.calls[0]
         assert window_start == good_time
         assert window_end == good_time
 

@@ -96,7 +96,6 @@ def _poll_error_body(error: str, message: str = "error") -> dict[str, object]:
 def _config(**overrides: object) -> Config:
     return Config(
         api_base_url=API_BASE_URL,
-        competition_id=1,
         import_dir=Path("/import"),
         dest_root=Path("/dest"),
         **overrides,  # type: ignore[arg-type]

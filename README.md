@@ -29,14 +29,13 @@ teamgym-watcher --help
 1. Authenticate once (see [Auth](#auth) below):
 
    ```bash
-   uv run teamgym-watcher auth --competition-id 42 --import-dir /path/to/import --dest-root /path/to/dest
+   uv run teamgym-watcher auth --import-dir /path/to/import --dest-root /path/to/dest
    ```
 
 2. Do a dry run first to see what would happen without touching any files:
 
    ```bash
    uv run teamgym-watcher run \
-     --competition-id 42 \
      --import-dir /path/to/import \
      --dest-root /path/to/dest \
      --dry-run
@@ -46,7 +45,6 @@ teamgym-watcher --help
 
    ```bash
    uv run teamgym-watcher run \
-     --competition-id 42 \
      --import-dir /path/to/import \
      --dest-root /path/to/dest
    ```
@@ -56,7 +54,6 @@ teamgym-watcher --help
 
    ```bash
    uv run teamgym-watcher process-once \
-     --competition-id 42 \
      --import-dir /path/to/import \
      --dest-root /path/to/dest
    ```
@@ -71,7 +68,6 @@ provided on every invocation (or set as shell aliases/wrapper scripts).
 
 | Flag | Default | Description |
 |---|---|---|
-| `--competition-id INT` | *required* | Numeric id of the competition to fetch tags for. |
 | `--import-dir PATH` | *required* | Directory the watcher monitors for new photos. Must already exist. |
 | `--dest-root PATH` | *required* | Root directory photos are moved into, under `<dest_root>/Competitions/<Competition>/...`. Created automatically. |
 | `--api-base-url URL` | production API | Override API base URL directly; takes precedence over `--local`/`--staging`. |
@@ -93,13 +89,19 @@ provided on every invocation (or set as shell aliases/wrapper scripts).
 `import_dir` and `dest_root` must be different directories, and neither may be nested inside
 the other.
 
+There is no `--competition-id` flag: the watcher never needs to be told which competition it's
+sorting for. Each batch's `fetch_tags_window` call is scoped only to that batch's own photos'
+capture-time span, and `/tags` is global across competitions with no server-side competition
+filter — the competition name comes from whichever tag a photo actually matches
+(`tag.competition.name`), not from a value you pass in up front.
+
 ## Auth
 
 The CLI uses the same GitHub OAuth [device flow](https://datatracker.ietf.org/doc/html/rfc8628)
 as the Lightroom plugin:
 
 ```bash
-uv run teamgym-watcher auth --competition-id 42 --import-dir /path/to/import --dest-root /path/to/dest
+uv run teamgym-watcher auth --import-dir /path/to/import --dest-root /path/to/dest
 ```
 
 This prints a one-time code and a URL (e.g. `https://github.com/login/device`). Open the URL,
@@ -219,7 +221,7 @@ above everything else when it's present.
 - **Running as a background service.** `teamgym-watcher run` is a long-lived foreground
   process; wrap it with your platform's usual service mechanism if you want it to survive
   logout/reboot — [NSSM](https://nssm.cc/) or Task Scheduler on Windows, `launchd` (a user
-  `LaunchAgent` plist running `teamgym-watcher run --competition-id 42 --import-dir /path/to/import --dest-root /path/to/dest --log-file /path/to/teamgym-watcher.log`) on macOS.
+  `LaunchAgent` plist running `teamgym-watcher run --import-dir /path/to/import --dest-root /path/to/dest --log-file /path/to/teamgym-watcher.log`) on macOS.
 - **Case-insensitive filesystems.** Both platforms' default filesystems are
   case-insensitive; companion-file grouping and collision-safe moves are written to be safe
   under that (e.g. `IMG_0001.CR2` and `img_0001.jpg` are grouped as a pair, not treated as

@@ -31,7 +31,6 @@ competition/tag configuration you haven't verified before.
 
    ```bash
    uv run teamgym-watcher process-once \
-     --competition-id <id> \
      --import-dir /path/to/import \
      --dest-root /path/to/dest
    ```
@@ -71,8 +70,9 @@ competition/tag configuration you haven't verified before.
 
 - First suspect whichever side changed most recently — check `git log` on `hierarchy.py`/
   `mapping.py` here, and the plugin's own changelog.
-- Confirm both sides are pointed at the *same* API base URL and competition id — a mismatch
-  here produces confusing, not-actually-related divergence.
+- Confirm both sides are pointed at the *same* API base URL, and that the Lightroom plugin is
+  scoped to the same competition the test photos actually belong to — a mismatch here produces
+  confusing, not-actually-related divergence.
 - If the divergence traces back to the Lua looking inconsistent rather than this port being
   wrong, do not "fix" the Python port unilaterally — see CLAUDE.md's parity rule and record
   the finding in [`docs/deviations.md`](deviations.md) instead.

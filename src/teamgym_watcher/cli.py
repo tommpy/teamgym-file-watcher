@@ -78,9 +78,6 @@ _StagingOption = Annotated[
         help="Use staging API base URL (https://api-staging.tagging.teamgymphotos.com/api).",
     ),
 ]
-_CompetitionIdOption = Annotated[
-    int, typer.Option("--competition-id", help="Competition id to fetch tags for.")
-]
 _ImportDirOption = Annotated[
     Path, typer.Option("--import-dir", help="Directory to watch for new photos.")
 ]
@@ -167,7 +164,6 @@ def _resolve_config(
     api_base_url: str | None,
     local: bool,
     staging: bool,
-    competition_id: int,
     import_dir: Path,
     dest_root: Path,
     timezone: str | None,
@@ -188,7 +184,6 @@ def _resolve_config(
         )
         cfg = build_config(
             api_base_url=resolved_api_base_url,
-            competition_id=competition_id,
             import_dir=import_dir,
             dest_root=dest_root,
             timezone=timezone,
@@ -204,8 +199,7 @@ def _resolve_config(
         logger.error("Configuration error: %s", exc)
         raise typer.Exit(code=CONFIG_ERROR_EXIT_CODE) from exc
     logger.info(
-        "Loaded configuration for competition %s (import_dir=%s, dest_root=%s, dry_run=%s).",
-        cfg.competition_id,
+        "Loaded configuration (import_dir=%s, dest_root=%s, dry_run=%s).",
         cfg.import_dir,
         cfg.dest_root,
         cfg.dry_run,
@@ -367,7 +361,6 @@ def _drain_once(
 
 @app.command()
 def run(
-    competition_id: _CompetitionIdOption,
     import_dir: _ImportDirOption,
     dest_root: _DestRootOption,
     verbose: _VerboseOption = False,
@@ -392,7 +385,6 @@ def run(
         api_base_url=api_base_url,
         local=local,
         staging=staging,
-        competition_id=competition_id,
         import_dir=import_dir,
         dest_root=dest_root,
         timezone=timezone,
@@ -427,7 +419,6 @@ def run(
 
 @app.command("process-once")
 def process_once(
-    competition_id: _CompetitionIdOption,
     import_dir: _ImportDirOption,
     dest_root: _DestRootOption,
     verbose: _VerboseOption = False,
@@ -452,7 +443,6 @@ def process_once(
         api_base_url=api_base_url,
         local=local,
         staging=staging,
-        competition_id=competition_id,
         import_dir=import_dir,
         dest_root=dest_root,
         timezone=timezone,
@@ -490,7 +480,6 @@ def process_once(
 
 @app.command()
 def auth(
-    competition_id: _CompetitionIdOption,
     import_dir: _ImportDirOption,
     dest_root: _DestRootOption,
     verbose: _VerboseOption = False,
@@ -513,7 +502,6 @@ def auth(
         api_base_url=api_base_url,
         local=local,
         staging=staging,
-        competition_id=competition_id,
         import_dir=import_dir,
         dest_root=dest_root,
         timezone=timezone,

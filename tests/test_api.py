@@ -218,7 +218,7 @@ class TestApiClientGet:
         )
         client = ApiClient(API_BASE_URL, "tok")
 
-        tags = client.fetch_tags_window(123, start, end)
+        tags = client.fetch_tags_window(start, end)
 
         assert [tag.id for tag in tags] == [1]
 
@@ -245,7 +245,7 @@ class TestApiClientGet:
         clock = FakeClock()
         client = ApiClient(API_BASE_URL, "tok", sleep=clock.sleep)
 
-        tags = client.fetch_tags_window(123, start, end)
+        tags = client.fetch_tags_window(start, end)
 
         assert [tag.id for tag in tags] == [1]
         assert clock.sleeps == [2.0]
@@ -269,7 +269,7 @@ class TestApiClientGet:
         client = ApiClient(API_BASE_URL, "tok", sleep=clock.sleep)
 
         with pytest.raises(ApiError):
-            client.fetch_tags_window(123, start, end)
+            client.fetch_tags_window(start, end)
 
         assert clock.sleeps == [2.0]
 
@@ -291,7 +291,7 @@ class TestApiClientGet:
         client = ApiClient(API_BASE_URL, "tok")
 
         with pytest.raises(Unauthorized, match="no token"):
-            client.fetch_tags_window(123, start, end)
+            client.fetch_tags_window(start, end)
 
     def test_generic_error_raises_api_error(self, httpx_mock: HTTPXMock) -> None:
         start = datetime(2024, 10, 5, 10, 0, tzinfo=UTC)
@@ -311,7 +311,7 @@ class TestApiClientGet:
         client = ApiClient(API_BASE_URL, "tok")
 
         with pytest.raises(ApiError, match="bad query"):
-            client.fetch_tags_window(123, start, end)
+            client.fetch_tags_window(start, end)
 
     def test_non_json_body_raises_api_error(self, httpx_mock: HTTPXMock) -> None:
         start = datetime(2024, 10, 5, 10, 0, tzinfo=UTC)
@@ -330,7 +330,7 @@ class TestApiClientGet:
         client = ApiClient(API_BASE_URL, "tok")
 
         with pytest.raises(ApiError, match="Invalid response"):
-            client.fetch_tags_window(123, start, end)
+            client.fetch_tags_window(start, end)
 
     def test_non_object_body_raises_api_error(self, httpx_mock: HTTPXMock) -> None:
         start = datetime(2024, 10, 5, 10, 0, tzinfo=UTC)
@@ -349,7 +349,7 @@ class TestApiClientGet:
         client = ApiClient(API_BASE_URL, "tok")
 
         with pytest.raises(ApiError, match="expected a JSON object"):
-            client.fetch_tags_window(123, start, end)
+            client.fetch_tags_window(start, end)
 
     def test_context_manager_closes_owned_client(self, httpx_mock: HTTPXMock) -> None:
         start = datetime(2024, 10, 5, 10, 0, tzinfo=UTC)
@@ -367,7 +367,7 @@ class TestApiClientGet:
         )
 
         with ApiClient(API_BASE_URL, "tok") as client:
-            tags = client.fetch_tags_window(123, start, end)
+            tags = client.fetch_tags_window(start, end)
 
         assert [tag.id for tag in tags] == [1]
         assert client._client.is_closed
@@ -399,7 +399,7 @@ class TestFetchTagsWindow:
         )
         client = ApiClient(API_BASE_URL, "tok")
 
-        tags = client.fetch_tags_window(123, start, end)
+        tags = client.fetch_tags_window(start, end)
 
         assert [tag.id for tag in tags] == [1]
 
@@ -446,11 +446,16 @@ class TestFetchTagsWindow:
         )
         client = ApiClient(API_BASE_URL, "tok")
 
-        tags = client.fetch_tags_window(123, start, end)
+        tags = client.fetch_tags_window(start, end)
 
         assert [tag.id for tag in tags] == [3, 2, 1]
 
-    def test_filters_out_other_competitions(self, httpx_mock: HTTPXMock) -> None:
+    def test_returns_tags_from_multiple_competitions_unfiltered(
+        self, httpx_mock: HTTPXMock
+    ) -> None:
+        """/tags is global and has no server-side competition filter, and the client no longer
+        filters by a caller-supplied competition id either -- every tag whose window overlaps
+        the requested span comes back, whichever competition it belongs to."""
         start = datetime(2024, 10, 5, 10, 0, tzinfo=UTC)
         end = datetime(2024, 10, 5, 11, 0, tzinfo=UTC)
         httpx_mock.add_response(
@@ -475,9 +480,9 @@ class TestFetchTagsWindow:
         )
         client = ApiClient(API_BASE_URL, "tok")
 
-        tags = client.fetch_tags_window(123, start, end)
+        tags = client.fetch_tags_window(start, end)
 
-        assert [tag.id for tag in tags] == [1]
+        assert [tag.id for tag in tags] == [1, 2]
 
     def test_unparseable_tag_is_skipped_with_warning(
         self, httpx_mock: HTTPXMock, caplog: pytest.LogCaptureFixture
@@ -501,7 +506,7 @@ class TestFetchTagsWindow:
         client = ApiClient(API_BASE_URL, "tok")
 
         with caplog.at_level("WARNING"):
-            tags = client.fetch_tags_window(123, start, end)
+            tags = client.fetch_tags_window(start, end)
 
         assert [tag.id for tag in tags] == [2]
         assert any("Skipping unparseable tag" in record.message for record in caplog.records)
@@ -524,7 +529,7 @@ class TestFetchTagsWindow:
         client = ApiClient(API_BASE_URL, "tok")
 
         with pytest.raises(Unauthorized, match="no token"):
-            client.fetch_tags_window(123, start, end)
+            client.fetch_tags_window(start, end)
 
     def test_results_are_sorted_by_start_time(self, httpx_mock: HTTPXMock) -> None:
         start = datetime(2024, 10, 5, 10, 0, tzinfo=UTC)
@@ -552,6 +557,6 @@ class TestFetchTagsWindow:
         )
         client = ApiClient(API_BASE_URL, "tok")
 
-        tags = client.fetch_tags_window(123, start, end)
+        tags = client.fetch_tags_window(start, end)
 
         assert [tag.id for tag in tags] == [2, 3, 1]

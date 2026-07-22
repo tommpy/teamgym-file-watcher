@@ -35,7 +35,6 @@ SAMPLES_DIR = Path(__file__).parent.parent / "samples"
 def _config(**overrides: object) -> Config:
     base: dict[str, object] = {
         "api_base_url": "http://localhost/api",
-        "competition_id": 1,
         "import_dir": Path(),
         "dest_root": Path(),
     }

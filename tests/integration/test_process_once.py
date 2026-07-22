@@ -79,7 +79,6 @@ def _invoke_process_once(
     cache_path: Path,
     import_dir: Path,
     dest_root: Path,
-    competition_id: int,
     *,
     dry_run: bool = False,
 ) -> object:
@@ -91,8 +90,6 @@ def _invoke_process_once(
         "1",
         "--api-base-url",
         API_BASE_URL,
-        "--competition-id",
-        str(competition_id),
         "--import-dir",
         str(import_dir),
         "--dest-root",
@@ -201,7 +198,7 @@ def test_international_scenario(
     original_raw_bytes = (import_dir / "IMG_0004.CR2").read_bytes()
 
     with caplog.at_level(logging.INFO):
-        result = _invoke_process_once(monkeypatch, cache_path, import_dir, dest_root, COMP_INTL_ID)
+        result = _invoke_process_once(monkeypatch, cache_path, import_dir, dest_root)
 
     assert result.exit_code == 0, result.output
 
@@ -358,7 +355,7 @@ def test_club_scenario(
     _mock_tags(httpx_mock, _club_tags())
     originals = _populate_club_import_dir(import_dir)
 
-    result = _invoke_process_once(monkeypatch, cache_path, import_dir, dest_root, COMP_CLUB_ID)
+    result = _invoke_process_once(monkeypatch, cache_path, import_dir, dest_root)
 
     assert result.exit_code == 0, result.output
     assert list_tree(dest_root) == {
@@ -408,7 +405,7 @@ def test_club_scenario_second_run_collides_with_first(
     cache_path = _authed_cache_path(tmp_path, make_jwt)
     _mock_tags(httpx_mock, _club_tags())
     _populate_club_import_dir(first_import_dir)
-    first = _invoke_process_once(monkeypatch, cache_path, first_import_dir, dest_root, COMP_CLUB_ID)
+    first = _invoke_process_once(monkeypatch, cache_path, first_import_dir, dest_root)
     assert first.exit_code == 0, first.output
     original_matched = (
         dest_root / CLUB_BASE / "Competition/Senior A/Riverside - Blue/Floor/IMG_0010.JPG"
@@ -429,9 +426,7 @@ def test_club_scenario_second_run_collides_with_first(
     new_matched_bytes = (second_import_dir / "IMG_0010.JPG").read_bytes()
     new_random_bytes = (second_import_dir / "IMG_0011.JPG").read_bytes()
 
-    second = _invoke_process_once(
-        monkeypatch, cache_path, second_import_dir, dest_root, COMP_CLUB_ID
-    )
+    second = _invoke_process_once(monkeypatch, cache_path, second_import_dir, dest_root)
 
     assert second.exit_code == 0, second.output
     matched_dir = dest_root / CLUB_BASE / "Competition/Senior A/Riverside - Blue/Floor"
@@ -503,7 +498,7 @@ def test_international_club_scenario(
         originals[filename] = (SAMPLES_DIR / filename).read_bytes()
     make_jpeg(import_dir / "IMG_0020.JPG", date_time_original="2026:07:20 20:20:00")
 
-    result = _invoke_process_once(monkeypatch, cache_path, import_dir, dest_root, COMP_ICLUB_ID)
+    result = _invoke_process_once(monkeypatch, cache_path, import_dir, dest_root)
 
     assert result.exit_code == 0, result.output
     base = f"Competitions/{COMP_ICLUB_NAME}"
@@ -574,9 +569,7 @@ def test_dry_run_leaves_filesystem_untouched(
     random_bytes = (import_dir / "random.JPG").read_bytes()
 
     with caplog.at_level(logging.INFO):
-        result = _invoke_process_once(
-            monkeypatch, cache_path, import_dir, dest_root, COMP_DRY_ID, dry_run=True
-        )
+        result = _invoke_process_once(monkeypatch, cache_path, import_dir, dest_root, dry_run=True)
 
     assert result.exit_code == 0, result.output
     assert "processed=2 matched=1 random=1 errors=0" in caplog.text

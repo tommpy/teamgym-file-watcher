@@ -58,14 +58,12 @@ class TestBuildConfig:
 
         cfg = build_config(
             api_base_url=LOCAL_API_BASE_URL,
-            competition_id=1,
             import_dir=import_dir,
             dest_root=dest_root,
         )
 
         assert cfg == Config(
             api_base_url=LOCAL_API_BASE_URL,
-            competition_id=1,
             import_dir=import_dir,
             dest_root=dest_root,
             timezone=None,
@@ -85,7 +83,6 @@ class TestBuildConfig:
         with pytest.raises(ConfigError, match="does not exist"):
             build_config(
                 api_base_url=LOCAL_API_BASE_URL,
-                competition_id=1,
                 import_dir=missing_import_dir,
                 dest_root=dest_root,
             )
@@ -98,7 +95,6 @@ class TestBuildConfig:
         with pytest.raises(ConfigError, match="not a directory"):
             build_config(
                 api_base_url=LOCAL_API_BASE_URL,
-                competition_id=1,
                 import_dir=import_file,
                 dest_root=dest_root,
             )
@@ -118,7 +114,6 @@ class TestBuildConfig:
         with pytest.raises(ConfigError, match="could not be created"):
             build_config(
                 api_base_url=LOCAL_API_BASE_URL,
-                competition_id=1,
                 import_dir=import_dir,
                 dest_root=dest_root,
             )
@@ -130,7 +125,6 @@ class TestBuildConfig:
         with pytest.raises(ConfigError, match="must not be inside"):
             build_config(
                 api_base_url=LOCAL_API_BASE_URL,
-                competition_id=1,
                 import_dir=import_dir,
                 dest_root=nested_dest,
             )
@@ -146,7 +140,6 @@ class TestBuildConfig:
         with pytest.raises(ConfigError, match="must not be inside"):
             build_config(
                 api_base_url=LOCAL_API_BASE_URL,
-                competition_id=1,
                 import_dir=nested_import,
                 dest_root=dest_root,
             )
@@ -157,7 +150,6 @@ class TestBuildConfig:
         with pytest.raises(ConfigError, match="not a recognised IANA timezone"):
             build_config(
                 api_base_url=LOCAL_API_BASE_URL,
-                competition_id=1,
                 import_dir=import_dir,
                 dest_root=dest_root,
                 timezone="Not/AZone",
@@ -169,7 +161,6 @@ class TestBuildConfig:
 
         kwargs: dict[str, object] = {
             "api_base_url": LOCAL_API_BASE_URL,
-            "competition_id": 1,
             "import_dir": import_dir,
             "dest_root": dest_root,
             field: 0,

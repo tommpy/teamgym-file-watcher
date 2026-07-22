@@ -25,7 +25,6 @@ class Config:
     """Fully resolved, validated runtime configuration."""
 
     api_base_url: str
-    competition_id: int
     import_dir: Path
     dest_root: Path
     timezone: str | None = None
@@ -53,7 +52,6 @@ def resolve_api_base_url(*, local: bool, staging: bool, api_base_url: str | None
 def build_config(
     *,
     api_base_url: str,
-    competition_id: int,
     import_dir: Path,
     dest_root: Path,
     timezone: str | None = None,
@@ -74,7 +72,6 @@ def build_config(
 
     return Config(
         api_base_url=api_base_url,
-        competition_id=competition_id,
         import_dir=import_dir,
         dest_root=dest_root,
         timezone=timezone,
