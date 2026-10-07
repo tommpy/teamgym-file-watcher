@@ -85,6 +85,7 @@ provided on every invocation (or set as shell aliases/wrapper scripts).
 | `--verbose` / `-v` | off | Enable debug logging. |
 | `--non-interactive` | off | (`run`/`process-once` only) Never prompt for re-auth; pause/fail instead. |
 | `--log-file PATH` | off | (`run`/`process-once` only) Also write logs to a rotating file. |
+| `--ui [auto\|dashboard\|plain]` | `auto` | (`run`/`process-once` only) See [Live dashboard](#live-dashboard) below. |
 
 `import_dir` and `dest_root` must be different directories, and neither may be nested inside
 the other.
@@ -117,6 +118,35 @@ terminal). It pauses the processing queue, logs a re-auth prompt every 60 second
 resumes automatically once you run `teamgym-watcher auth` in another terminal to refresh the
 cached token — no queued photos are dropped while it waits (see
 [Troubleshooting](#troubleshooting)).
+
+## Live dashboard
+
+`run` and `process-once` can show a continuously-updating status view instead of (or above)
+the scrolling log lines, controlled by `--ui`:
+
+- `auto` (default) — shows the dashboard when stdout is a real, non-dumb terminal; falls back
+  to today's plain scrolling log output otherwise (piped/redirected output, CI, scripts).
+- `dashboard` — always show it, even when stdout isn't a terminal.
+- `plain` — always use today's plain log output, even on a real terminal.
+
+When active, ordinary log lines keep scrolling above it as usual; the dashboard itself is an
+always-current footer showing:
+
+```
+╭─────────────────────────── teamgym-watcher ────────────────────────────╮
+│ mode=run  elapsed=0:04:12                                               │
+│ import_dir: /path/to/import                                             │
+│ dest_root:  /path/to/dest                                                │
+│ api:        https://api.tagging.teamgymphotos.com/api                   │
+│ processed=142 matched=118 random=24 errors=0 queued=3                   │
+│ Authenticated                                                           │
+╰──────────────────────────────────────────────────────────────────────╯
+```
+
+The last line flips to the same "Authentication required" wording logged elsewhere whenever
+a token expires mid-run. Piped/redirected/scripted invocations are unaffected: `--ui auto`
+against anything other than a real terminal produces byte-for-byte the same plain log output
+as before this feature existed.
 
 ## Hierarchy examples
 

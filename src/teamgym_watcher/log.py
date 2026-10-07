@@ -5,8 +5,12 @@ from __future__ import annotations
 import logging
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from rich.logging import RichHandler
+
+if TYPE_CHECKING:
+    from rich.console import Console
 
 _CONSOLE_HANDLER_NAME = "teamgym_watcher.console"
 _FILE_HANDLER_NAME = "teamgym_watcher.file"
@@ -15,12 +19,18 @@ _MAX_BYTES = 5 * 1024 * 1024
 _BACKUP_COUNT = 5
 
 
-def setup_logging(verbose: bool, log_file: Path | None = None) -> None:
+def setup_logging(
+    verbose: bool, log_file: Path | None = None, console: Console | None = None
+) -> None:
     """Configure the root logger with a Rich console handler and optional rotating file handler.
 
     Safe to call repeatedly (e.g. once per CLI stub invocation): handlers previously
     installed by this function are replaced rather than duplicated, so the root logger
     never accumulates extra output on repeated calls.
+
+    ``console``, when given, is used as the ``RichHandler``'s console instead of letting it
+    construct its own -- needed so logging and a live dashboard can share one ``Console`` and
+    not corrupt each other's output on the same terminal.
     """
     level = logging.DEBUG if verbose else logging.INFO
     root = logging.getLogger()
@@ -31,7 +41,7 @@ def setup_logging(verbose: bool, log_file: Path | None = None) -> None:
             root.removeHandler(handler)
             handler.close()
 
-    console_handler = RichHandler(rich_tracebacks=True, show_path=False)
+    console_handler = RichHandler(console=console, rich_tracebacks=True, show_path=False)
     console_handler.set_name(_CONSOLE_HANDLER_NAME)
     console_handler.setLevel(level)
     root.addHandler(console_handler)

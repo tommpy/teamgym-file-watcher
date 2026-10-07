@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+from rich.console import Console
+
 from teamgym_watcher.log import setup_logging
 
 
@@ -37,6 +39,15 @@ def test_setup_logging_creates_log_file_parent_dir(tmp_path: Path) -> None:
     setup_logging(verbose=False, log_file=log_file)
 
     assert log_file.parent.is_dir()
+
+
+def test_setup_logging_with_console_attaches_handler_using_that_instance() -> None:
+    console = Console(file=None)
+
+    setup_logging(verbose=False, log_file=None, console=console)
+
+    handler = next(h for h in logging.getLogger().handlers if h.name == "teamgym_watcher.console")
+    assert handler.console is console  # type: ignore[attr-defined]
 
 
 def test_setup_logging_closes_previous_file_handler_on_replacement(tmp_path: Path) -> None:

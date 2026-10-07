@@ -34,6 +34,7 @@ from teamgym_watcher.config import (
     STAGING_API_BASE_URL,
     Config,
 )
+from teamgym_watcher.dashboard import DashboardState
 from teamgym_watcher.exif import ExifToolUnavailableError, MissingCaptureTimeError
 from teamgym_watcher.journal import Journal, JournalStatus, Stats
 from teamgym_watcher.mover import PhotoGroup
@@ -69,6 +70,17 @@ def _authed_cache_path(tmp_path: Path, make_jwt: Callable[[dict[str, object]], s
     jwt = make_jwt({"login": "octocat", "exp": 10_000_000_000})
     save_token_cache(cache_path, AccessToken(access_token=jwt, token_type="bearer", scope=""))
     return cache_path
+
+
+class _StubDashboard:
+    """Duck-typed stand-in for ``LiveDashboard`` exposing only ``update()``, recording every
+    state it's given so tests can assert it was refreshed the expected number of times."""
+
+    def __init__(self) -> None:
+        self.states: list[DashboardState] = []
+
+    def update(self, state: DashboardState) -> None:
+        self.states.append(state)
 
 
 class _FakeApiClient:
@@ -207,6 +219,66 @@ def test_process_once_happy_path_drains_directory_and_exits_zero(
             "--non-interactive",
             "--stability-seconds",
             "1",
+            *_valid_args(import_dir, dest_root),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert not (import_dir / "IMG_0001.JPG").exists()
+
+
+def test_process_once_ui_auto_default_produces_the_same_result_as_plain(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_jwt: Callable[[dict[str, object]], str],
+) -> None:
+    """Regression guard: ``--ui auto`` against a non-tty (every ``CliRunner`` invocation) must
+    fall back to plain output identically to today's behaviour -- see prompts/17 requirement 5."""
+    import_dir = tmp_path / "import"
+    import_dir.mkdir()
+    dest_root = tmp_path / "dest"
+    cache_path = _authed_cache_path(tmp_path, make_jwt)
+    monkeypatch.setattr("teamgym_watcher.cli.token_cache_path", lambda: cache_path)
+    (import_dir / "IMG_0001.JPG").write_bytes(b"not a real jpeg")
+
+    result = runner.invoke(
+        app,
+        [
+            "process-once",
+            "--non-interactive",
+            "--stability-seconds",
+            "1",
+            "--ui",
+            "auto",
+            *_valid_args(import_dir, dest_root),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert not (import_dir / "IMG_0001.JPG").exists()
+
+
+def test_process_once_ui_dashboard_forced_on_non_tty_does_not_crash(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_jwt: Callable[[dict[str, object]], str],
+) -> None:
+    import_dir = tmp_path / "import"
+    import_dir.mkdir()
+    dest_root = tmp_path / "dest"
+    cache_path = _authed_cache_path(tmp_path, make_jwt)
+    monkeypatch.setattr("teamgym_watcher.cli.token_cache_path", lambda: cache_path)
+    (import_dir / "IMG_0001.JPG").write_bytes(b"not a real jpeg")
+
+    result = runner.invoke(
+        app,
+        [
+            "process-once",
+            "--non-interactive",
+            "--stability-seconds",
+            "1",
+            "--ui",
+            "dashboard",
             *_valid_args(import_dir, dest_root),
         ],
     )
@@ -430,6 +502,30 @@ class TestDrainOnce:
         assert auth_paused is False
         assert deps.stats.snapshot().processed == 0
 
+    def test_calls_dashboard_update_after_each_processed_chunk(self, tmp_path: Path) -> None:
+        import_dir = tmp_path / "import"
+        import_dir.mkdir()
+        photo = import_dir / "a.JPG"
+        photo.write_bytes(b"data")
+        clock_box = [0.0]
+        watcher = Watcher(import_dir, stability_seconds=3, clock=lambda: clock_box[0])
+        deps = _pipeline_deps(tmp_path, import_dir=import_dir)
+        dashboard = _StubDashboard()
+
+        def fake_sleep(seconds: float) -> None:
+            clock_box[0] += seconds
+
+        auth_paused = _drain_once(
+            watcher,
+            deps,
+            sleep=fake_sleep,
+            dashboard=dashboard,  # type: ignore[arg-type]
+        )
+
+        assert auth_paused is False
+        assert len(dashboard.states) >= 1
+        assert dashboard.states[-1].processed == 1
+
 
 class TestRunWatchLoop:
     def test_returns_immediately_when_stop_event_is_already_set(self, tmp_path: Path) -> None:
@@ -503,6 +599,30 @@ class TestRunWatchLoop:
 
         # One periodic summary line mid-loop, plus the final "Stopping: ..." summary.
         assert caplog.text.count("processed=") >= 2
+
+    def test_calls_dashboard_update_on_every_poll_tick(self, tmp_path: Path) -> None:
+        import_dir = tmp_path / "import"
+        import_dir.mkdir()
+        watcher = Watcher(import_dir, stability_seconds=1)
+        deps = _pipeline_deps(tmp_path, import_dir=import_dir)
+        stop_event = threading.Event()
+        dashboard = _StubDashboard()
+        sleep_calls = {"n": 0}
+
+        def fake_sleep(seconds: float) -> None:
+            sleep_calls["n"] += 1
+            if sleep_calls["n"] >= 2:
+                stop_event.set()
+
+        _run_watch_loop(
+            watcher,
+            deps,
+            stop_event=stop_event,
+            sleep=fake_sleep,
+            dashboard=dashboard,  # type: ignore[arg-type]
+        )
+
+        assert len(dashboard.states) >= 2
 
 
 class TestProcessReadyGroups:

@@ -6,6 +6,8 @@ import logging
 import signal
 import threading
 import time
+from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
 
@@ -26,6 +28,12 @@ from teamgym_watcher.auth import (
 )
 from teamgym_watcher.auth import logout as revoke_refresh_token
 from teamgym_watcher.config import Config, ConfigError, build_config, resolve_api_base_url
+from teamgym_watcher.dashboard import (
+    AUTH_REQUIRED_MESSAGE,
+    DashboardState,
+    LiveDashboard,
+    should_use_dashboard,
+)
 from teamgym_watcher.exif import ExifToolUnavailableError, ensure_exiftool_available
 from teamgym_watcher.journal import Journal, Stats, StatsSnapshot
 from teamgym_watcher.log import setup_logging
@@ -42,6 +50,15 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from teamgym_watcher.mover import PhotoGroup
+
+
+class UiMode(StrEnum):
+    """``--ui`` choices: ``auto`` detects a real terminal, ``dashboard``/``plain`` force it."""
+
+    AUTO = "auto"
+    DASHBOARD = "dashboard"
+    PLAIN = "plain"
+
 
 app = typer.Typer(
     name="teamgym-watcher",
@@ -135,6 +152,16 @@ _NonInteractiveOption = Annotated[
 _LogFileOption = Annotated[
     Path | None, typer.Option("--log-file", help="Also write logs to this rotating file.")
 ]
+_UiOption = Annotated[
+    UiMode,
+    typer.Option(
+        "--ui",
+        help=(
+            "Terminal UI mode: auto (dashboard on a real terminal, plain otherwise), "
+            "dashboard (force the live dashboard), or plain (force plain log output)."
+        ),
+    ),
+]
 
 
 def _version_callback(value: bool) -> None:
@@ -175,8 +202,9 @@ def _resolve_config(
     exiftool_enabled: bool,
     exiftool_path: str,
     recursive: bool,
+    console: Console | None = None,
 ) -> Config:
-    setup_logging(verbose=verbose, log_file=log_file)
+    setup_logging(verbose=verbose, log_file=log_file, console=console)
     try:
         resolved_api_base_url = resolve_api_base_url(
             local=local,
@@ -254,16 +282,48 @@ def _build_deps(cfg: Config, *, interactive: bool) -> PipelineDeps:
     )
 
 
-def _log_auth_required() -> None:
-    message = "Authentication required: run `teamgym-watcher auth` to re-authenticate."
-    logger.warning(message)
-    Console().print(
-        Panel(message, title="TeamGym API Authentication Required", style="bold yellow")
+def _log_auth_required(console: Console | None = None) -> None:
+    logger.warning(AUTH_REQUIRED_MESSAGE)
+    (console or Console()).print(
+        Panel(
+            AUTH_REQUIRED_MESSAGE, title="TeamGym API Authentication Required", style="bold yellow"
+        )
+    )
+
+
+def _build_dashboard_state(
+    deps: PipelineDeps,
+    watcher: Watcher,
+    *,
+    started_at: datetime,
+    mode: str,
+    auth_ok: bool,
+) -> DashboardState:
+    snapshot = deps.stats.snapshot()
+    return DashboardState(
+        started_at=started_at,
+        now=datetime.now(UTC),
+        mode=mode,
+        dry_run=deps.config.dry_run,
+        import_dir=deps.config.import_dir,
+        dest_root=deps.config.dest_root,
+        api_base_url=deps.config.api_base_url,
+        processed=snapshot.processed,
+        matched=snapshot.matched,
+        random=snapshot.random,
+        errors=snapshot.errors,
+        queued=len(watcher.queue),
+        auth_ok=auth_ok,
+        auth_message=None if auth_ok else AUTH_REQUIRED_MESSAGE,
     )
 
 
 def _process_ready_groups(
-    watcher: Watcher, groups: list[PhotoGroup], deps: PipelineDeps
+    watcher: Watcher,
+    groups: list[PhotoGroup],
+    deps: PipelineDeps,
+    *,
+    on_chunk: Callable[[bool], None] | None = None,
 ) -> tuple[list[PhotoGroup], bool]:
     """Process ``groups`` in ``deps.config.batch_size``-sized chunks.
 
@@ -271,6 +331,10 @@ def _process_ready_groups(
     so log output and journal writes are chunked even when a rescan or long-idle period hands
     back far more than one chunk's worth of ready files at once. Logs the summary line on
     every chunk's completion.
+
+    ``on_chunk``, when given, is called after every chunk with whether that chunk paused for
+    authentication -- the caller (``_run_watch_loop``/``_drain_once``) uses this to refresh a
+    live dashboard without this function needing to know anything about dashboards itself.
 
     Returns the groups left unattempted because authentication was required partway through a
     chunk, and whether that happened -- the caller must keep them queued and retry, never drop
@@ -290,6 +354,8 @@ def _process_ready_groups(
                 len(watcher.queue),
             )
         )
+        if on_chunk is not None:
+            on_chunk(result.auth_paused)
         if result.auth_paused:
             return [*result.pending, *groups[start + len(chunk) :]], True
     return [], False
@@ -305,12 +371,31 @@ def _run_watch_loop(
     auth_log_interval_seconds: float = 60.0,
     sleep: Callable[[float], None] = time.sleep,
     clock: Callable[[], float] = time.monotonic,
+    dashboard: LiveDashboard | None = None,
+    console: Console | None = None,
 ) -> StatsSnapshot:
     """Drain ready batches forever until ``stop_event`` is set (graceful Ctrl-C: the current
     batch always finishes before the loop checks the event again)."""
     pending: list[PhotoGroup] = []
     last_summary = clock()
     last_auth_log = 0.0
+    started_at = datetime.now(UTC)
+    auth_ok = True
+
+    def _refresh_dashboard() -> None:
+        if dashboard is not None:
+            dashboard.update(
+                _build_dashboard_state(
+                    deps, watcher, started_at=started_at, mode="run", auth_ok=auth_ok
+                )
+            )
+
+    def _on_chunk(chunk_auth_paused: bool) -> None:
+        nonlocal auth_ok
+        auth_ok = not chunk_auth_paused
+        _refresh_dashboard()
+
+    _refresh_dashboard()
 
     while not stop_event.is_set():
         ready = watcher.poll_ready()
@@ -318,11 +403,12 @@ def _run_watch_loop(
         pending = []
 
         if groups:
-            pending, auth_paused = _process_ready_groups(watcher, groups, deps)
+            pending, auth_paused = _process_ready_groups(watcher, groups, deps, on_chunk=_on_chunk)
+            auth_ok = not auth_paused
             if auth_paused:
                 now = clock()
                 if now - last_auth_log >= auth_log_interval_seconds:
-                    _log_auth_required()
+                    _log_auth_required(console)
                     last_auth_log = now
 
         now = clock()
@@ -339,6 +425,8 @@ def _run_watch_loop(
             )
             last_summary = now
 
+        _refresh_dashboard()
+
         if not groups:
             sleep(poll_interval_seconds)
 
@@ -349,11 +437,16 @@ def _run_watch_loop(
             final.processed, final.matched, final.random, final.errors, len(watcher.queue)
         ),
     )
+    _refresh_dashboard()
     return final
 
 
 def _drain_once(
-    watcher: Watcher, deps: PipelineDeps, *, sleep: Callable[[float], None] = time.sleep
+    watcher: Watcher,
+    deps: PipelineDeps,
+    *,
+    sleep: Callable[[float], None] = time.sleep,
+    dashboard: LiveDashboard | None = None,
 ) -> bool:
     """Fully drain whatever is currently in the import directory.
 
@@ -363,6 +456,27 @@ def _drain_once(
     """
     watcher.rescan(deps.journal.load_processed())
     pending: list[PhotoGroup] = []
+    started_at = datetime.now(UTC)
+    auth_ok = True
+
+    def _refresh_dashboard() -> None:
+        if dashboard is not None:
+            dashboard.update(
+                _build_dashboard_state(
+                    deps,
+                    watcher,
+                    started_at=started_at,
+                    mode="process-once",
+                    auth_ok=auth_ok,
+                )
+            )
+
+    def _on_chunk(chunk_auth_paused: bool) -> None:
+        nonlocal auth_ok
+        auth_ok = not chunk_auth_paused
+        _refresh_dashboard()
+
+    _refresh_dashboard()
 
     while True:
         ready = watcher.poll_ready()
@@ -371,11 +485,12 @@ def _drain_once(
 
         if not groups:
             if len(watcher.queue) == 0:
+                _refresh_dashboard()
                 return False
             sleep(deps.config.stability_seconds)
             continue
 
-        pending, auth_paused = _process_ready_groups(watcher, groups, deps)
+        pending, auth_paused = _process_ready_groups(watcher, groups, deps, on_chunk=_on_chunk)
         if auth_paused:
             return True
 
@@ -398,8 +513,10 @@ def run(
     exiftool_path: _ExiftoolPathOption = "exiftool",
     non_interactive: _NonInteractiveOption = False,
     log_file: _LogFileOption = None,
+    ui: _UiOption = UiMode.AUTO,
 ) -> None:
     """Watch the import directory forever, matching and moving photos as they arrive."""
+    console = Console()
     cfg = _resolve_config(
         verbose=verbose,
         log_file=log_file,
@@ -416,6 +533,7 @@ def run(
         recursive=recursive,
         exiftool_enabled=exiftool_enabled,
         exiftool_path=exiftool_path,
+        console=console,
     )
     deps = _build_deps(cfg, interactive=not non_interactive)
     watcher = Watcher(
@@ -424,6 +542,8 @@ def run(
     watcher.rescan(deps.journal.load_processed())
     watcher.start(already_processed=deps.journal.load_processed)
 
+    dashboard = LiveDashboard(console) if should_use_dashboard(console, ui.value) else None
+
     stop_event = threading.Event()
 
     def _handle_sigint(signum: int, frame: object) -> None:
@@ -431,9 +551,13 @@ def run(
         stop_event.set()
 
     previous_handler = signal.signal(signal.SIGINT, _handle_sigint)
+    if dashboard is not None:
+        dashboard.start()
     try:
-        _run_watch_loop(watcher, deps, stop_event=stop_event)
+        _run_watch_loop(watcher, deps, stop_event=stop_event, dashboard=dashboard, console=console)
     finally:
+        if dashboard is not None:
+            dashboard.stop()
         signal.signal(signal.SIGINT, previous_handler)
         watcher.stop()
 
@@ -456,8 +580,10 @@ def process_once(
     exiftool_path: _ExiftoolPathOption = "exiftool",
     non_interactive: _NonInteractiveOption = False,
     log_file: _LogFileOption = None,
+    ui: _UiOption = UiMode.AUTO,
 ) -> None:
     """Drain the import directory once and exit."""
+    console = Console()
     cfg = _resolve_config(
         verbose=verbose,
         log_file=log_file,
@@ -474,13 +600,21 @@ def process_once(
         recursive=recursive,
         exiftool_enabled=exiftool_enabled,
         exiftool_path=exiftool_path,
+        console=console,
     )
     deps = _build_deps(cfg, interactive=not non_interactive)
     watcher = Watcher(
         cfg.import_dir, recursive=cfg.recursive, stability_seconds=cfg.stability_seconds
     )
 
-    auth_paused = _drain_once(watcher, deps)
+    dashboard = LiveDashboard(console) if should_use_dashboard(console, ui.value) else None
+    if dashboard is not None:
+        dashboard.start()
+    try:
+        auth_paused = _drain_once(watcher, deps, dashboard=dashboard)
+    finally:
+        if dashboard is not None:
+            dashboard.stop()
     snapshot = deps.stats.snapshot()
     logger.info(
         format_summary_line(
