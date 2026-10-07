@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -18,8 +19,10 @@ import pytest
 from typer.testing import CliRunner
 
 from teamgym_watcher import __version__
+from teamgym_watcher.api import ApiError
 from teamgym_watcher.auth import AccessToken, AuthError, save_token_cache
 from teamgym_watcher.cli import (
+    API_ERROR_EXIT_CODE,
     AUTH_ERROR_EXIT_CODE,
     CONFIG_ERROR_EXIT_CODE,
     EXIFTOOL_ERROR_EXIT_CODE,
@@ -35,7 +38,12 @@ from teamgym_watcher.config import (
     Config,
 )
 from teamgym_watcher.dashboard import DashboardState
-from teamgym_watcher.exif import ExifToolUnavailableError, MissingCaptureTimeError
+from teamgym_watcher.exif import (
+    CaptureTime,
+    ExifToolUnavailableError,
+    MissingCaptureTimeError,
+    TimestampSource,
+)
 from teamgym_watcher.journal import Journal, JournalStatus, Stats
 from teamgym_watcher.mover import PhotoGroup
 from teamgym_watcher.pipeline import BatchResult, PipelineDeps, process_batch
@@ -324,9 +332,11 @@ def test_process_once_exits_with_processing_error_code_when_errors_recorded(
     cache_path = _authed_cache_path(tmp_path, make_jwt)
     monkeypatch.setattr("teamgym_watcher.cli.token_cache_path", lambda: cache_path)
 
-    def _fake_drain_once(watcher: Watcher, deps: PipelineDeps, **kwargs: object) -> bool:
+    def _fake_drain_once(
+        watcher: Watcher, deps: PipelineDeps, **kwargs: object
+    ) -> tuple[bool, bool]:
         deps.stats.record(JournalStatus.ERROR)
-        return False
+        return False, False
 
     monkeypatch.setattr("teamgym_watcher.cli._drain_once", _fake_drain_once)
 
@@ -348,13 +358,37 @@ def test_process_once_exits_with_auth_error_code_when_drain_pauses_for_auth(
     cache_path = _authed_cache_path(tmp_path, make_jwt)
     monkeypatch.setattr("teamgym_watcher.cli.token_cache_path", lambda: cache_path)
 
-    monkeypatch.setattr("teamgym_watcher.cli._drain_once", lambda watcher, deps, **kw: True)
+    monkeypatch.setattr(
+        "teamgym_watcher.cli._drain_once", lambda watcher, deps, **kw: (True, False)
+    )
 
     result = runner.invoke(
         app, ["process-once", "--non-interactive", *_valid_args(import_dir, dest_root)]
     )
 
     assert result.exit_code == AUTH_ERROR_EXIT_CODE
+
+
+def test_process_once_exits_with_api_error_code_when_drain_pauses_for_connection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_jwt: Callable[[dict[str, object]], str],
+) -> None:
+    import_dir = tmp_path / "import"
+    import_dir.mkdir()
+    dest_root = tmp_path / "dest"
+    cache_path = _authed_cache_path(tmp_path, make_jwt)
+    monkeypatch.setattr("teamgym_watcher.cli.token_cache_path", lambda: cache_path)
+
+    monkeypatch.setattr(
+        "teamgym_watcher.cli._drain_once", lambda watcher, deps, **kw: (False, True)
+    )
+
+    result = runner.invoke(
+        app, ["process-once", "--non-interactive", *_valid_args(import_dir, dest_root)]
+    )
+
+    assert result.exit_code == API_ERROR_EXIT_CODE
 
 
 def test_auth_command_saves_token_and_prints_identity(
@@ -484,9 +518,10 @@ class TestDrainOnce:
             sleeps.append(seconds)
             clock_box[0] += seconds
 
-        auth_paused = _drain_once(watcher, deps, sleep=fake_sleep)
+        auth_paused, connection_error = _drain_once(watcher, deps, sleep=fake_sleep)
 
         assert auth_paused is False
+        assert connection_error is False
         assert not photo.exists()
         assert deps.stats.snapshot().processed == 1
         assert sleeps  # at least one wait for the stability window to clear
@@ -497,9 +532,12 @@ class TestDrainOnce:
         watcher = Watcher(import_dir, stability_seconds=3)
         deps = _pipeline_deps(tmp_path, import_dir=import_dir)
 
-        auth_paused = _drain_once(watcher, deps, sleep=lambda s: pytest.fail("should not sleep"))
+        auth_paused, connection_error = _drain_once(
+            watcher, deps, sleep=lambda s: pytest.fail("should not sleep")
+        )
 
         assert auth_paused is False
+        assert connection_error is False
         assert deps.stats.snapshot().processed == 0
 
     def test_calls_dashboard_update_after_each_processed_chunk(self, tmp_path: Path) -> None:
@@ -515,7 +553,7 @@ class TestDrainOnce:
         def fake_sleep(seconds: float) -> None:
             clock_box[0] += seconds
 
-        auth_paused = _drain_once(
+        auth_paused, connection_error = _drain_once(
             watcher,
             deps,
             sleep=fake_sleep,
@@ -523,6 +561,7 @@ class TestDrainOnce:
         )
 
         assert auth_paused is False
+        assert connection_error is False
         assert len(dashboard.states) >= 1
         assert dashboard.states[-1].processed == 1
 
@@ -624,6 +663,67 @@ class TestRunWatchLoop:
 
         assert len(dashboard.states) >= 2
 
+    def test_connection_error_pauses_and_retries_without_crashing(self, tmp_path: Path) -> None:
+        """Regression test: a ``ConnectError``-turned-``ApiError`` from ``fetch_tags_window``
+        (e.g. the API server is down) must never propagate out of the loop -- it pauses the
+        batch for retry exactly like an expired token, and the retry succeeds once the server
+        is reachable again."""
+        import_dir = tmp_path / "import"
+        import_dir.mkdir()
+        photo = import_dir / "a.JPG"
+        photo.write_bytes(b"data")
+        watcher = Watcher(import_dir, stability_seconds=0)
+        watcher.queue.enqueue(photo)
+
+        class _FlakyApiClient:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def fetch_tags_window(self, start: object, end: object) -> list[object]:
+                self.calls += 1
+                if self.calls == 1:
+                    raise ApiError("connection refused")
+                return []
+
+        def _capture_time(path: Path, config: Config) -> CaptureTime:
+            return CaptureTime(
+                utc=datetime(2024, 10, 5, 10, 30, tzinfo=UTC), source=TimestampSource.PHOTO_OFFSET
+            )
+
+        dest_root = tmp_path / "dest"
+        dest_root.mkdir()
+        config = Config(api_base_url="http://api.test", import_dir=import_dir, dest_root=dest_root)
+        api_client = _FlakyApiClient()
+        deps = PipelineDeps(
+            config=config,
+            api_client=api_client,  # type: ignore[arg-type]
+            journal=Journal(dest_root),
+            stats=Stats(),
+            extract_capture_time=_capture_time,
+        )
+        stop_event = threading.Event()
+        dashboard = _StubDashboard()
+        sleep_calls = {"n": 0}
+
+        def fake_sleep(seconds: float) -> None:
+            sleep_calls["n"] += 1
+            if sleep_calls["n"] >= 3:
+                stop_event.set()
+
+        snapshot = _run_watch_loop(
+            watcher,
+            deps,
+            stop_event=stop_event,
+            sleep=fake_sleep,
+            dashboard=dashboard,  # type: ignore[arg-type]
+        )
+
+        assert api_client.calls >= 2  # the first (failing) call was retried, not fatal
+        assert snapshot.processed == 1  # drained once the connection recovered
+        assert not photo.exists()
+        assert any(not s.connection_ok for s in dashboard.states)  # outage visible on dashboard
+        assert dashboard.states[-1].connection_ok is True  # and cleared once recovered
+
 
 class TestProcessReadyGroups:
     """PLAN.md's "Batching / API economy": ready groups must be drained in
@@ -660,9 +760,10 @@ class TestProcessReadyGroups:
         monkeypatch.setattr("teamgym_watcher.cli.process_batch", spy)
 
         with caplog.at_level(logging.INFO):
-            pending, auth_paused = _process_ready_groups(watcher, groups, deps)
+            pending, auth_paused, connection_error = _process_ready_groups(watcher, groups, deps)
 
         assert auth_paused is False
+        assert connection_error is False
         assert pending == []
         assert chunk_sizes == [2, 2, 1]  # 5 groups, batch_size=2 -> three chunks
         assert deps.stats.snapshot().processed == 5
@@ -687,10 +788,43 @@ class TestProcessReadyGroups:
 
         monkeypatch.setattr("teamgym_watcher.cli.process_batch", fake_process_batch)
 
-        pending, auth_paused = _process_ready_groups(watcher, groups, deps)
+        pending, auth_paused, connection_error = _process_ready_groups(watcher, groups, deps)
 
         assert auth_paused is True
+        assert connection_error is False
         # Second chunk (groups[2:4]) pauses in full, plus the third chunk (groups[4:]) that
         # was never attempted -- neither may be dropped.
+        assert pending == groups[2:]
+        assert call_count["n"] == 2  # the third chunk must not be attempted after the pause
+
+    def test_connection_error_mid_chunking_returns_remaining_chunks_as_pending(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import_dir = tmp_path / "import"
+        import_dir.mkdir()
+        deps = _pipeline_deps(tmp_path, import_dir=import_dir, batch_size=2)
+        watcher = Watcher(import_dir, stability_seconds=0)
+        groups = self._groups(import_dir, 5)
+        call_count = {"n": 0}
+
+        def fake_process_batch(chunk: object, deps_: PipelineDeps) -> BatchResult:
+            call_count["n"] += 1
+            chunk_list = list(chunk)  # type: ignore[arg-type]
+            if call_count["n"] == 2:
+                return BatchResult(
+                    outcomes=(),
+                    pending=tuple(chunk_list),
+                    auth_paused=False,
+                    connection_error=True,
+                    connection_message="Request failed: connection refused",
+                )
+            return BatchResult(outcomes=(), pending=(), auth_paused=False)
+
+        monkeypatch.setattr("teamgym_watcher.cli.process_batch", fake_process_batch)
+
+        pending, auth_paused, connection_error = _process_ready_groups(watcher, groups, deps)
+
+        assert auth_paused is False
+        assert connection_error is True
         assert pending == groups[2:]
         assert call_count["n"] == 2  # the third chunk must not be attempted after the pause

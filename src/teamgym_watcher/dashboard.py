@@ -33,6 +33,7 @@ if TYPE_CHECKING:
 AUTH_REQUIRED_MESSAGE: Final = (
     "Authentication required: run `teamgym-watcher auth` to re-authenticate."
 )
+CONNECTION_ERROR_MESSAGE: Final = "Cannot reach the TeamGym API; retrying automatically."
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,6 +66,8 @@ class DashboardState:
     queued: int
     auth_ok: bool
     auth_message: str | None
+    connection_ok: bool = True
+    connection_message: str | None = None
 
 
 def render_dashboard(state: DashboardState) -> RenderableType:
@@ -85,13 +88,20 @@ def render_dashboard(state: DashboardState) -> RenderableType:
         state.processed, state.matched, state.random, state.errors, state.queued
     )
 
+    if state.connection_ok:
+        connection_line = "[bold green]Connected[/bold green]"
+    else:
+        connection_line = (
+            f"[bold red]{state.connection_message or CONNECTION_ERROR_MESSAGE}[/bold red]"
+        )
+
     if state.auth_ok:
         auth_line = "[bold green]Authenticated[/bold green]"
     else:
         auth_line = f"[bold yellow]{state.auth_message or AUTH_REQUIRED_MESSAGE}[/bold yellow]"
 
     return Panel(
-        Group(header, paths, stats_line, auth_line),
+        Group(header, paths, stats_line, connection_line, auth_line),
         title="teamgym-watcher",
         border_style="cyan",
     )

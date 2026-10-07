@@ -7,7 +7,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from pathlib import Path
 
-from teamgym_watcher.api import Competition, Tag, Unauthorized
+from teamgym_watcher.api import ApiError, Competition, Tag, Unauthorized
 from teamgym_watcher.config import Config
 from teamgym_watcher.exif import CaptureTime, MissingCaptureTimeError, TimestampSource
 from teamgym_watcher.journal import Journal, JournalStatus, Stats, journal_path
@@ -57,6 +57,18 @@ class UnauthorizedApiClient:
     def fetch_tags_window(self, start: datetime, end: datetime) -> list[Tag]:
         self.calls += 1
         raise Unauthorized("token expired")
+
+
+class ConnectionErrorApiClient:
+    """Stands in for a server that's refusing connections, e.g. ``ConnectError`` after
+    ``ApiClient``'s retry is exhausted."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def fetch_tags_window(self, start: datetime, end: datetime) -> list[Tag]:
+        self.calls += 1
+        raise ApiError("Request to http://localhost/api/tags failed after 2 attempt(s): boom")
 
 
 def _config(tmp_path: Path, *, dry_run: bool = False) -> Config:
@@ -471,4 +483,40 @@ class TestAuthenticationPause:
         assert result.auth_paused is True
         assert result.outcomes == ()
         assert result.pending == (group_a, group_b)
+        assert not journal_path(deps.config.dest_root).exists()
+
+
+class TestConnectionErrorPause:
+    """A network-level failure (server down, connection refused, timeout) must pause the
+    batch for retry exactly like an expired token -- never crash the caller, never journal
+    the groups as errors."""
+
+    def test_api_error_from_fetch_pauses_whole_batch_and_is_not_journaled(
+        self, tmp_path: Path
+    ) -> None:
+        photo_a = _touch(tmp_path / "import" / "a.JPG")
+        photo_b = _touch(tmp_path / "import" / "b.JPG")
+        deps = _deps(
+            tmp_path,
+            api_client=ConnectionErrorApiClient(),
+            extract_capture_time=_fake_extractor(
+                {
+                    photo_a: datetime(2024, 10, 5, 10, 30, tzinfo=UTC),
+                    photo_b: datetime(2024, 10, 5, 10, 30, tzinfo=UTC),
+                }
+            ),
+        )
+        group_a = PhotoGroup(files=(photo_a,), capture_time_file=photo_a)
+        group_b = PhotoGroup(files=(photo_b,), capture_time_file=photo_b)
+
+        result = process_batch([group_a, group_b], deps)
+
+        assert result.auth_paused is False
+        assert result.connection_error is True
+        assert result.connection_message is not None
+        assert "boom" in result.connection_message
+        assert result.outcomes == ()
+        assert result.pending == (group_a, group_b)
+        assert photo_a.exists()
+        assert photo_b.exists()
         assert not journal_path(deps.config.dest_root).exists()

@@ -23,7 +23,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Protocol
 
 from teamgym_watcher import exif, hierarchy, mapping, matcher, mover
-from teamgym_watcher.api import Tag, Unauthorized
+from teamgym_watcher.api import ApiError, Tag, Unauthorized
 from teamgym_watcher.journal import JournalRecord, JournalStatus
 from teamgym_watcher.mover import MoveStatus, PhotoGroup
 
@@ -101,14 +101,16 @@ class GroupOutcome:
 class BatchResult:
     """Outcome of one :func:`process_batch` call.
 
-    ``pending`` holds groups that were never attempted because authentication was required
-    during the batch's ``fetch_tags_window`` call -- the caller must keep them queued and
-    retry, never drop them.
+    ``pending`` holds groups that were never attempted because authentication was required, or
+    the API was unreachable, during the batch's ``fetch_tags_window`` call -- the caller must
+    keep them queued and retry, never drop them.
     """
 
     outcomes: tuple[GroupOutcome, ...]
     pending: tuple[PhotoGroup, ...]
     auth_paused: bool
+    connection_error: bool = False
+    connection_message: str | None = None
 
 
 def format_summary_line(
@@ -223,6 +225,23 @@ def process_batch(groups: Iterable[PhotoGroup], deps: PipelineDeps) -> BatchResu
                 "Authentication required; pausing batch with %d group(s) pending", len(group_list)
             )
             return BatchResult(outcomes=(), pending=tuple(group_list), auth_paused=True)
+        except ApiError as exc:
+            # Network-level failure (server down, refused connection, timeout) rather than an
+            # authentication problem -- pause and retry exactly like an auth pause, never crash
+            # the watcher and never journal these as errors (CLAUDE.md: never drop work).
+            logger.warning(
+                "Could not reach the TeamGym API; pausing batch with %d group(s) pending and "
+                "retrying: %s",
+                len(group_list),
+                exc,
+            )
+            return BatchResult(
+                outcomes=(),
+                pending=tuple(group_list),
+                auth_paused=False,
+                connection_error=True,
+                connection_message=str(exc),
+            )
 
     # Step d: match each group-with-capture-time against the fetched tags
     tag_matches: dict[int, Tag | None] = {}

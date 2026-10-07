@@ -11,6 +11,7 @@ from rich.console import Console
 
 from teamgym_watcher.dashboard import (
     AUTH_REQUIRED_MESSAGE,
+    CONNECTION_ERROR_MESSAGE,
     DashboardState,
     LiveDashboard,
     render_dashboard,
@@ -38,6 +39,8 @@ def _state(
     queued: int = 4,
     auth_ok: bool = True,
     auth_message: str | None = None,
+    connection_ok: bool = True,
+    connection_message: str | None = None,
 ) -> DashboardState:
     return DashboardState(
         started_at=datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC),
@@ -54,6 +57,8 @@ def _state(
         queued=queued,
         auth_ok=auth_ok,
         auth_message=auth_message,
+        connection_ok=connection_ok,
+        connection_message=connection_message,
     )
 
 
@@ -87,6 +92,20 @@ class TestRenderDashboard:
 
         assert AUTH_REQUIRED_MESSAGE in text
         assert "Authenticated" not in text
+
+    def test_shows_connected_phrasing_when_connection_ok(self) -> None:
+        text = _render_text(_state(connection_ok=True))
+
+        assert "Connected" in text
+        assert CONNECTION_ERROR_MESSAGE not in text
+
+    def test_shows_connection_error_phrasing_when_not_connection_ok(self) -> None:
+        text = _render_text(
+            _state(connection_ok=False, connection_message=CONNECTION_ERROR_MESSAGE)
+        )
+
+        assert CONNECTION_ERROR_MESSAGE in text
+        assert "Connected" not in text
 
 
 class TestShouldUseDashboard:

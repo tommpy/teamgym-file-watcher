@@ -30,6 +30,7 @@ from teamgym_watcher.auth import logout as revoke_refresh_token
 from teamgym_watcher.config import Config, ConfigError, build_config, resolve_api_base_url
 from teamgym_watcher.dashboard import (
     AUTH_REQUIRED_MESSAGE,
+    CONNECTION_ERROR_MESSAGE,
     DashboardState,
     LiveDashboard,
     should_use_dashboard,
@@ -39,6 +40,7 @@ from teamgym_watcher.journal import Journal, Stats, StatsSnapshot
 from teamgym_watcher.log import setup_logging
 from teamgym_watcher.mover import group_files
 from teamgym_watcher.pipeline import (
+    BatchResult,
     CompetitionNameCache,
     PipelineDeps,
     format_summary_line,
@@ -291,6 +293,12 @@ def _log_auth_required(console: Console | None = None) -> None:
     )
 
 
+def _log_connection_error(message: str | None, console: Console | None = None) -> None:
+    text = message or CONNECTION_ERROR_MESSAGE
+    logger.warning(text)
+    (console or Console()).print(Panel(text, title="TeamGym API Unreachable", style="bold red"))
+
+
 def _build_dashboard_state(
     deps: PipelineDeps,
     watcher: Watcher,
@@ -298,6 +306,8 @@ def _build_dashboard_state(
     started_at: datetime,
     mode: str,
     auth_ok: bool,
+    connection_ok: bool = True,
+    connection_message: str | None = None,
 ) -> DashboardState:
     snapshot = deps.stats.snapshot()
     return DashboardState(
@@ -315,6 +325,10 @@ def _build_dashboard_state(
         queued=len(watcher.queue),
         auth_ok=auth_ok,
         auth_message=None if auth_ok else AUTH_REQUIRED_MESSAGE,
+        connection_ok=connection_ok,
+        connection_message=(
+            None if connection_ok else (connection_message or CONNECTION_ERROR_MESSAGE)
+        ),
     )
 
 
@@ -323,8 +337,8 @@ def _process_ready_groups(
     groups: list[PhotoGroup],
     deps: PipelineDeps,
     *,
-    on_chunk: Callable[[bool], None] | None = None,
-) -> tuple[list[PhotoGroup], bool]:
+    on_chunk: Callable[[BatchResult], None] | None = None,
+) -> tuple[list[PhotoGroup], bool, bool]:
     """Process ``groups`` in ``deps.config.batch_size``-sized chunks.
 
     PLAN.md's "Batching / API economy" requires photos to be drained in batches (default 25)
@@ -332,13 +346,14 @@ def _process_ready_groups(
     back far more than one chunk's worth of ready files at once. Logs the summary line on
     every chunk's completion.
 
-    ``on_chunk``, when given, is called after every chunk with whether that chunk paused for
-    authentication -- the caller (``_run_watch_loop``/``_drain_once``) uses this to refresh a
-    live dashboard without this function needing to know anything about dashboards itself.
+    ``on_chunk``, when given, is called after every chunk with that chunk's
+    :class:`~teamgym_watcher.pipeline.BatchResult` -- the caller (``_run_watch_loop``/
+    ``_drain_once``) uses this to refresh a live dashboard without this function needing to
+    know anything about dashboards itself.
 
-    Returns the groups left unattempted because authentication was required partway through a
-    chunk, and whether that happened -- the caller must keep them queued and retry, never drop
-    them.
+    Returns the groups left unattempted because authentication was required, or the API was
+    unreachable, partway through a chunk, and which of those two happened -- the caller must
+    keep the groups queued and retry, never drop them.
     """
     size = deps.config.batch_size
     for start in range(0, len(groups), size):
@@ -355,10 +370,14 @@ def _process_ready_groups(
             )
         )
         if on_chunk is not None:
-            on_chunk(result.auth_paused)
-        if result.auth_paused:
-            return [*result.pending, *groups[start + len(chunk) :]], True
-    return [], False
+            on_chunk(result)
+        if result.auth_paused or result.connection_error:
+            return (
+                [*result.pending, *groups[start + len(chunk) :]],
+                result.auth_paused,
+                result.connection_error,
+            )
+    return [], False, False
 
 
 def _run_watch_loop(
@@ -369,30 +388,47 @@ def _run_watch_loop(
     poll_interval_seconds: float = 1.0,
     summary_interval_seconds: float = 60.0,
     auth_log_interval_seconds: float = 60.0,
+    connection_log_interval_seconds: float = 60.0,
     sleep: Callable[[float], None] = time.sleep,
     clock: Callable[[], float] = time.monotonic,
     dashboard: LiveDashboard | None = None,
     console: Console | None = None,
 ) -> StatsSnapshot:
     """Drain ready batches forever until ``stop_event`` is set (graceful Ctrl-C: the current
-    batch always finishes before the loop checks the event again)."""
+    batch always finishes before the loop checks the event again).
+
+    An unreachable API (connection refused, timeout) never crashes this loop: ``process_batch``
+    turns it into a paused batch exactly like an expired token, so the ready groups stay queued
+    and are retried on the next poll tick once the server comes back.
+    """
     pending: list[PhotoGroup] = []
     last_summary = clock()
     last_auth_log = 0.0
+    last_connection_log = 0.0
     started_at = datetime.now(UTC)
     auth_ok = True
+    connection_ok = True
+    connection_message: str | None = None
 
     def _refresh_dashboard() -> None:
         if dashboard is not None:
             dashboard.update(
                 _build_dashboard_state(
-                    deps, watcher, started_at=started_at, mode="run", auth_ok=auth_ok
+                    deps,
+                    watcher,
+                    started_at=started_at,
+                    mode="run",
+                    auth_ok=auth_ok,
+                    connection_ok=connection_ok,
+                    connection_message=connection_message,
                 )
             )
 
-    def _on_chunk(chunk_auth_paused: bool) -> None:
-        nonlocal auth_ok
-        auth_ok = not chunk_auth_paused
+    def _on_chunk(result: BatchResult) -> None:
+        nonlocal auth_ok, connection_ok, connection_message
+        auth_ok = not result.auth_paused
+        connection_ok = not result.connection_error
+        connection_message = result.connection_message if result.connection_error else None
         _refresh_dashboard()
 
     _refresh_dashboard()
@@ -403,13 +439,21 @@ def _run_watch_loop(
         pending = []
 
         if groups:
-            pending, auth_paused = _process_ready_groups(watcher, groups, deps, on_chunk=_on_chunk)
+            pending, auth_paused, connection_error = _process_ready_groups(
+                watcher, groups, deps, on_chunk=_on_chunk
+            )
             auth_ok = not auth_paused
+            connection_ok = not connection_error
             if auth_paused:
                 now = clock()
                 if now - last_auth_log >= auth_log_interval_seconds:
                     _log_auth_required(console)
                     last_auth_log = now
+            if connection_error:
+                now = clock()
+                if now - last_connection_log >= connection_log_interval_seconds:
+                    _log_connection_error(connection_message, console)
+                    last_connection_log = now
 
         now = clock()
         if now - last_summary >= summary_interval_seconds:
@@ -447,17 +491,21 @@ def _drain_once(
     *,
     sleep: Callable[[float], None] = time.sleep,
     dashboard: LiveDashboard | None = None,
-) -> bool:
+) -> tuple[bool, bool]:
     """Fully drain whatever is currently in the import directory.
 
-    Returns ``True`` if authentication was required mid-drain -- any not-yet-processed files
-    are left untouched in the import directory (never dropped) and will be retried on the
-    next run.
+    Returns ``(auth_paused, connection_error)``. Either one ends the drain early -- any
+    not-yet-processed files are left untouched in the import directory (never dropped) and
+    will be retried on the next run. ``process-once`` only drains once, so an unreachable API
+    is reported back to the caller to exit non-zero rather than retried in a loop here (unlike
+    ``_run_watch_loop``, which retries indefinitely).
     """
     watcher.rescan(deps.journal.load_processed())
     pending: list[PhotoGroup] = []
     started_at = datetime.now(UTC)
     auth_ok = True
+    connection_ok = True
+    connection_message: str | None = None
 
     def _refresh_dashboard() -> None:
         if dashboard is not None:
@@ -468,12 +516,16 @@ def _drain_once(
                     started_at=started_at,
                     mode="process-once",
                     auth_ok=auth_ok,
+                    connection_ok=connection_ok,
+                    connection_message=connection_message,
                 )
             )
 
-    def _on_chunk(chunk_auth_paused: bool) -> None:
-        nonlocal auth_ok
-        auth_ok = not chunk_auth_paused
+    def _on_chunk(result: BatchResult) -> None:
+        nonlocal auth_ok, connection_ok, connection_message
+        auth_ok = not result.auth_paused
+        connection_ok = not result.connection_error
+        connection_message = result.connection_message if result.connection_error else None
         _refresh_dashboard()
 
     _refresh_dashboard()
@@ -486,13 +538,15 @@ def _drain_once(
         if not groups:
             if len(watcher.queue) == 0:
                 _refresh_dashboard()
-                return False
+                return False, False
             sleep(deps.config.stability_seconds)
             continue
 
-        pending, auth_paused = _process_ready_groups(watcher, groups, deps, on_chunk=_on_chunk)
-        if auth_paused:
-            return True
+        pending, auth_paused, connection_error = _process_ready_groups(
+            watcher, groups, deps, on_chunk=_on_chunk
+        )
+        if auth_paused or connection_error:
+            return auth_paused, connection_error
 
 
 @app.command()
@@ -611,7 +665,7 @@ def process_once(
     if dashboard is not None:
         dashboard.start()
     try:
-        auth_paused = _drain_once(watcher, deps, dashboard=dashboard)
+        auth_paused, connection_error = _drain_once(watcher, deps, dashboard=dashboard)
     finally:
         if dashboard is not None:
             dashboard.stop()
@@ -626,6 +680,9 @@ def process_once(
         )
     )
 
+    if connection_error:
+        logger.error("Could not reach the TeamGym API; check your connection and try again.")
+        raise typer.Exit(code=API_ERROR_EXIT_CODE)
     if auth_paused:
         logger.error("Authentication required; run `teamgym-watcher auth` and try again.")
         raise typer.Exit(code=AUTH_ERROR_EXIT_CODE)

@@ -139,14 +139,17 @@ always-current footer showing:
 │ dest_root:  /path/to/dest                                                │
 │ api:        https://api.tagging.teamgymphotos.com/api                   │
 │ processed=142 matched=118 random=24 errors=0 queued=3                   │
+│ Connected                                                                │
 │ Authenticated                                                           │
 ╰──────────────────────────────────────────────────────────────────────╯
 ```
 
-The last line flips to the same "Authentication required" wording logged elsewhere whenever
-a token expires mid-run. Piped/redirected/scripted invocations are unaffected: `--ui auto`
-against anything other than a real terminal produces byte-for-byte the same plain log output
-as before this feature existed.
+The "Connected" line flips to red ("Cannot reach the TeamGym API; retrying automatically.")
+whenever the server is unreachable (refused connection, timeout). The "Authenticated" line
+flips to the same "Authentication required" wording logged elsewhere whenever a token expires
+mid-run. Piped/redirected/scripted invocations are unaffected: `--ui auto` against anything
+other than a real terminal produces byte-for-byte the same plain log output as before this
+feature existed.
 
 ## Hierarchy examples
 
@@ -219,6 +222,12 @@ than that will hit this mid-run. Neither command drops queued photos when this h
 automatically as soon as `teamgym-watcher auth` (run in another terminal) refreshes the
 cached token. `process-once` instead exits with an error and leaves the not-yet-processed
 files untouched in the import directory — re-run it after authenticating.
+
+**API unreachable (server down, connection refused, timeout).** Neither command crashes:
+`run` pauses processing, logs a warning every 60 seconds, and picks the queue back up
+automatically on the next poll once the server answers again. `process-once` exits non-zero
+and leaves the not-yet-processed files untouched in the import directory — re-run it once the
+server is back.
 
 **Unsupported RAW format (e.g. `.cr3`).** `exifread` parses JPEG and TIFF-based RAW formats
 (NEF, CR2, ARW, DNG, ...) but not Canon's CR3 container. If you shoot CR3, install
